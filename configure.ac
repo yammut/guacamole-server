@@ -18,7 +18,7 @@
 #
 
 AC_PREREQ([2.61])
-AC_INIT([guacamole-server], [1.2.0])
+AC_INIT([guacamole-server], [1.3.0])
 AC_CONFIG_AUX_DIR([build-aux])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AM_SILENT_RULES([yes])
@@ -75,21 +75,50 @@ AC_CHECK_LIB([dl], [dlopen],
                             AC_MSG_ERROR("libdl is required on systems which do not otherwise provide dlopen()"),
                             [#include <dlfcn.h>])])
 
-# OSSP UUID
-AC_CHECK_LIB([ossp-uuid], [uuid_make], [UUID_LIBS=-lossp-uuid],
-             AC_CHECK_LIB([uuid], [uuid_make], [UUID_LIBS=-luuid],
-                          AC_MSG_ERROR("The OSSP UUID library is required")))
+#
+# libuuid
+#
 
-# Check for and validate OSSP uuid.h header
-AC_CHECK_HEADERS([ossp/uuid.h])
-AC_CHECK_DECL([uuid_make],,
-              AC_MSG_ERROR("No OSSP uuid.h found in include path"),
-              [#ifdef HAVE_OSSP_UUID_H
-               #include <ossp/uuid.h>
-               #else
-               #include <uuid.h>
-               #endif
-               ])
+have_libuuid=disabled
+AC_ARG_WITH([libuuid],
+            [AS_HELP_STRING([--with-libuuid],
+                            [use libuuid to generate unique identifiers @<:@default=check@:>@])],
+            [],
+            [with_libuuid=check])
+
+if test "x$with_libuuid" != "xno"
+then
+    have_libuuid=yes
+    AC_CHECK_LIB([uuid], [uuid_generate],
+                 [UUID_LIBS=-luuid]
+                 [AC_DEFINE([HAVE_LIBUUID],, [Whether libuuid is available])],
+                 [have_libuuid=no])
+fi
+
+# OSSP UUID (if libuuid is unavilable)
+if test "x${have_libuuid}" != "xyes"
+then
+
+    AC_CHECK_LIB([ossp-uuid], [uuid_make], [UUID_LIBS=-lossp-uuid],
+                 AC_CHECK_LIB([uuid], [uuid_make], [UUID_LIBS=-luuid],
+                              AC_MSG_ERROR([
+  --------------------------------------------
+   Unable to find libuuid or the OSSP UUID library.
+   Either libuuid (from util-linux) or the OSSP UUID library is required for
+   guacamole-server to be built.
+  --------------------------------------------])))
+
+    # Check for and validate OSSP uuid.h header
+    AC_CHECK_HEADERS([ossp/uuid.h])
+    AC_CHECK_DECL([uuid_make],,
+                  AC_MSG_ERROR("No OSSP uuid.h found in include path"),
+                  [#ifdef HAVE_OSSP_UUID_H
+                   #include <ossp/uuid.h>
+                   #else
+                   #include <uuid.h>
+                   #endif
+                   ])
+fi
 
 # cunit
 AC_CHECK_LIB([cunit], [CU_run_test], [CUNIT_LIBS=-lcunit])
@@ -150,6 +179,10 @@ AC_SUBST([PULSE_INCLUDE], '-I$(top_srcdir)/src/pulse')
 # Common base SSH client
 AC_SUBST([COMMON_SSH_LTLIB],   '$(top_builddir)/src/common-ssh/libguac_common_ssh.la')
 AC_SUBST([COMMON_SSH_INCLUDE], '-I$(top_srcdir)/src/common-ssh')
+
+# Kubernetes support
+AC_SUBST([LIBGUAC_CLIENT_KUBERNETES_LTLIB],   '$(top_builddir)/src/protocols/kubernetes/libguac-client-kubernetes.la')
+AC_SUBST([LIBGUAC_CLIENT_KUBERNETES_INCLUDE], '-I$(top_srcdir)/src/protocols/kubernetes')
 
 # RDP support
 AC_SUBST([LIBGUAC_CLIENT_RDP_LTLIB],   '$(top_builddir)/src/protocols/rdp/libguac-client-rdp.la')
@@ -490,6 +523,27 @@ then
     AC_CHECK_LIB([vncclient], [rfbInitClient], [VNC_LIBS="$VNC_LIBS -lvncclient"], [have_libvncserver=no])
 fi
 
+#
+# Underlying libvncserver usage of gcrypt
+#
+
+if test "x${have_libvncserver}" = "xyes"
+then
+
+    # Whether libvncserver was built against libgcrypt
+    AC_CHECK_DECL([LIBVNCSERVER_WITH_CLIENT_GCRYPT],
+                         [AC_CHECK_HEADER(gcrypt.h,,
+                                          [AC_MSG_WARN([
+  --------------------------------------------
+   libvncserver appears to be built against
+   libgcrypt, but the libgcrypt headers
+   could not be found. VNC will be disabled.
+  --------------------------------------------])
+                                           have_libvncserver=no])],,
+                    [[#include <rfb/rfbconfig.h>]])
+
+fi
+
 AM_CONDITIONAL([ENABLE_VNC], [test "x${have_libvncserver}" = "xyes"])
 AC_SUBST(VNC_LIBS)
 
@@ -573,6 +627,34 @@ then
 fi
 
 #
+# Generic credential support within libVNCServer (authentication beyond
+# basic, standard VNC passwords)
+#
+
+if test "x${have_libvncserver}" = "xyes"
+then
+
+    have_vnc_creds=yes
+    AC_CHECK_MEMBERS([rfbClient.GetCredential],
+                     [], [have_vnc_creds=no],
+                     [[#include <rfb/rfbclient.h>]])
+
+    if test "x${have_vnc_creds}" = "xno"
+    then
+        AC_MSG_WARN([
+      --------------------------------------------
+       No generic credential support found in libvncclient.
+       VNC authentication support will be limited to passwords.
+      --------------------------------------------])
+    else
+        AC_DEFINE([ENABLE_VNC_GENERIC_CREDENTIALS],,
+                  [Whether support for generic VNC credentials is available.])
+    fi
+
+fi
+
+
+#
 # FreeRDP 2 (libfreerdp2, libfreerdp-client2, and libwinpr2)
 #
 
@@ -623,7 +705,44 @@ then
 
 fi
 
-# Variation in memory internal allocation/free behavior
+# It is difficult or impossible to test for variations in FreeRDP behavior in
+# between releases, as the change in behavior may not (yet) be associated with
+# a corresponding change in version number and may not have any detectable
+# effect on the FreeRDP API
+
+AC_ARG_ENABLE(allow_freerdp_snapshots,
+              [AS_HELP_STRING([--enable-allow-freerdp-snapshots],
+                              [allow building against unknown development snapshots of FreeRDP])
+              ],allow_freerdp_snapshots=yes)
+
+if test "x${have_freerdp2}" = "xyes" -a "x${allow_freerdp_snapshots}" != "xyes"
+then
+
+    AC_MSG_CHECKING([whether FreeRDP appears to be a development version])
+    AC_EGREP_CPP([\"[0-9]+\\.[0-9]+\\.[0-9]+(-rc[0-9]+)?\"], [
+
+        #include <freerdp/version.h>
+        FREERDP_VERSION_FULL
+
+    ],
+    [AC_MSG_RESULT([no])],
+    [AC_MSG_RESULT([yes])]
+    [AC_MSG_ERROR([
+  --------------------------------------------
+   You are building against a development version of FreeRDP. Non-release
+   versions of FreeRDP may have differences in behavior that are impossible to
+   check for at build time. This may result in memory leaks or other strange
+   behavior.
+
+   *** PLEASE USE A RELEASED VERSION OF FREERDP IF POSSIBLE ***
+
+   If you are ABSOLUTELY CERTAIN that building against this version of FreeRDP
+   is OK, rerun configure with the --enable-allow-freerdp-snapshots
+  --------------------------------------------])])
+
+fi
+
+# Variation in memory internal allocation/free behavior for bitmaps
 if test "x${have_freerdp2}" = "xyes"
 then
 
@@ -646,6 +765,29 @@ then
     [AC_MSG_RESULT([no])])
 
 fi
+
+# Variation in memory internal allocation/free behavior for channel streams
+if test "x${have_freerdp2}" = "xyes"
+then
+
+    # FreeRDP 2.0.0-rc3 through 2.0.0-rc4 automatically free the wStream
+    # provided to pVirtualChannelWriteEx(). This changed in commit 1b78b59, and
+    # implementations must manually free the wStream after it is no longer
+    # needed (after the write is complete or cancelled).
+    AC_MSG_CHECKING([whether pVirtualChannelWriteEx() frees the wStream upon completion])
+    AC_EGREP_CPP([\"2\\.0\\.0-(rc|dev)[3-4]\"], [
+
+        #include <freerdp/version.h>
+        FREERDP_VERSION_FULL
+
+    ],
+    [AC_MSG_RESULT([yes])]
+    [AC_DEFINE([FREERDP_SVC_CORE_FREES_WSTREAM],,
+               [Whether pVirtualChannelWriteEx() frees the wStream upon completion])],
+    [AC_MSG_RESULT([no])])
+
+fi
+
 
 # Glyph callback variants
 if test "x${have_freerdp2}" = "xyes"
@@ -752,6 +894,14 @@ then
 
    See: https://issues.apache.org/jira/browse/GUACAMOLE-962
   --------------------------------------------])],
+                     [[#include <freerdp/freerdp.h>]])
+fi
+
+# Updated certificate verification callback (introduced with 2.0.0, not present
+# in 2.0.0-rc4 or earlier)
+if test "x${have_freerdp2}" = "xyes"
+then
+    AC_CHECK_MEMBERS([freerdp.VerifyCertificateEx],,,
                      [[#include <freerdp/freerdp.h>]])
 fi
 
@@ -1053,6 +1203,7 @@ AC_CONFIG_FILES([Makefile
                  src/guaclog/man/guaclog.1
                  src/pulse/Makefile
                  src/protocols/kubernetes/Makefile
+                 src/protocols/kubernetes/tests/Makefile
                  src/protocols/rdp/Makefile
                  src/protocols/rdp/tests/Makefile
                  src/protocols/ssh/Makefile
