@@ -20,12 +20,13 @@
 #include "config.h"
 
 #include "argv.h"
-#include "common/recording.h"
 #include "telnet.h"
 #include "terminal/terminal.h"
 
 #include <guacamole/client.h>
 #include <guacamole/protocol.h>
+#include <guacamole/recording.h>
+#include <guacamole/timestamp.h>
 #include <guacamole/wol.h>
 #include <libtelnet.h>
 
@@ -302,7 +303,9 @@ static void __guac_telnet_event_handler(telnet_t* telnet, telnet_event_t* event,
         case TELNET_EV_DO:
             if (event->neg.telopt == TELNET_TELOPT_NAWS) {
                 telnet_client->naws_enabled = 1;
-                guac_telnet_send_naws(telnet, telnet_client->term->term_width, telnet_client->term->term_height);
+                guac_telnet_send_naws(telnet,
+                        guac_terminal_get_columns(telnet_client->term),
+                        guac_terminal_get_rows(telnet_client->term));
             }
             break;
 
@@ -421,9 +424,29 @@ static telnet_t* __guac_telnet_create_session(guac_client* client) {
                 NI_NUMERICHOST | NI_NUMERICSERV)))
             guac_client_log(client, GUAC_LOG_DEBUG, "Unable to resolve host: %s", gai_strerror(retval));
 
-        /* Connect */
-        if (connect(fd, current_address->ai_addr,
-                        current_address->ai_addrlen) == 0) {
+        fd_set fdset;
+        FD_ZERO(&fdset);
+        FD_SET(fd, &fdset);
+
+        struct timeval timeout_tv;
+        timeout_tv.tv_sec = settings->timeout;
+        timeout_tv.tv_usec = 0;
+
+        if (connect(fd, current_address->ai_addr, current_address->ai_addrlen) < 0) {
+            guac_client_abort(client, GUAC_PROTOCOL_STATUS_SERVER_ERROR,
+                "Failed to connect: %s", strerror(errno));
+            return NULL;
+        }
+        
+        retval = select(fd + 1, NULL, &fdset, NULL, &timeout_tv);
+
+        if (retval == 0) {
+            guac_client_log(client, GUAC_LOG_ERROR, "Timeout connecting to "
+                    "host %s, port %s", connected_address, connected_port);
+            continue;
+        }
+
+        else if (retval > 0) {
 
             guac_client_log(client, GUAC_LOG_DEBUG, "Successfully connected to "
                     "host %s, port %s", connected_address, connected_port);
@@ -557,17 +580,17 @@ void* guac_telnet_client_thread(void* data) {
     pthread_t input_thread;
     char buffer[8192];
     int wait_result;
-    
+
     /* If Wake-on-LAN is enabled, attempt to wake. */
     if (settings->wol_send_packet) {
         guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet, "
                 "and pausing for %d seconds.", settings->wol_wait_time);
-        
+
         /* Send the Wake-on-LAN request. */
         if (guac_wol_wake(settings->wol_mac_addr, settings->wol_broadcast_addr,
                 settings->wol_udp_port))
             return NULL;
-        
+
         /* If wait time is specified, sleep for that amount of time. */
         if (settings->wol_wait_time > 0)
             guac_timestamp_msleep(settings->wol_wait_time * 1000);
@@ -575,7 +598,7 @@ void* guac_telnet_client_thread(void* data) {
 
     /* Set up screen recording, if requested */
     if (settings->recording_path != NULL) {
-        telnet_client->recording = guac_common_recording_create(client,
+        telnet_client->recording = guac_recording_create(client,
                 settings->recording_path,
                 settings->recording_name,
                 settings->create_recording_path,
@@ -585,12 +608,23 @@ void* guac_telnet_client_thread(void* data) {
                 settings->recording_include_keys);
     }
 
+    /* Create terminal options with required parameters */
+    guac_terminal_options* options = guac_terminal_options_create(
+            settings->width, settings->height, settings->resolution);
+
+    /* Set optional parameters */
+    options->disable_copy = settings->disable_copy;
+    options->max_scrollback = settings->max_scrollback;
+    options->font_name = settings->font_name;
+    options->font_size = settings->font_size;
+    options->color_scheme = settings->color_scheme;
+    options->backspace = settings->backspace;
+
     /* Create terminal */
-    telnet_client->term = guac_terminal_create(client,
-            telnet_client->clipboard, settings->disable_copy,
-            settings->max_scrollback, settings->font_name, settings->font_size,
-            settings->resolution, settings->width, settings->height,
-            settings->color_scheme, settings->backspace);
+    telnet_client->term = guac_terminal_create(client, options);
+
+    /* Free options struct now that it's been used */
+    free(options);
 
     /* Fail if terminal init failed */
     if (telnet_client->term == NULL) {

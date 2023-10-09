@@ -17,12 +17,12 @@
  * under the License.
  */
 
-#include "common/recording.h"
 #include "input.h"
 #include "kubernetes.h"
 #include "terminal/terminal.h"
 
 #include <guacamole/client.h>
+#include <guacamole/recording.h>
 #include <guacamole/user.h>
 
 #include <stdlib.h>
@@ -41,7 +41,7 @@ int guac_kubernetes_user_mouse_handler(guac_user* user,
 
     /* Report mouse position within recording */
     if (kubernetes_client->recording != NULL)
-        guac_common_recording_report_mouse(kubernetes_client->recording, x, y,
+        guac_recording_report_mouse(kubernetes_client->recording, x, y,
                 mask);
 
     guac_terminal_send_mouse(term, user, x, y, mask);
@@ -57,7 +57,7 @@ int guac_kubernetes_user_key_handler(guac_user* user, int keysym, int pressed) {
 
     /* Report key state within recording */
     if (kubernetes_client->recording != NULL)
-        guac_common_recording_report_key(kubernetes_client->recording,
+        guac_recording_report_key(kubernetes_client->recording,
                 keysym, pressed);
 
     /* Skip if terminal not yet ready */
@@ -86,8 +86,9 @@ int guac_kubernetes_user_size_handler(guac_user* user, int width, int height) {
     guac_terminal_resize(terminal, width, height);
 
     /* Update Kubernetes terminal window size if connected */
-    guac_kubernetes_resize(client, terminal->term_height,
-            terminal->term_width);
+    guac_kubernetes_resize(client,
+            guac_terminal_get_rows(terminal),
+            guac_terminal_get_columns(terminal));
 
     return 0;
 }

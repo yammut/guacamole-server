@@ -28,6 +28,7 @@
 #include <freerdp/settings.h>
 #include <freerdp/freerdp.h>
 #include <guacamole/client.h>
+#include <guacamole/fips.h>
 #include <guacamole/string.h>
 #include <guacamole/user.h>
 #include <guacamole/wol-constants.h>
@@ -38,6 +39,16 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+/**
+ * A warning to log when NLA mode is selected while FIPS mode is active on the
+ * guacd server.
+ */
+const char fips_nla_mode_warning[] = (
+        "NLA security mode was selected, but is known to be currently incompatible "
+        "with FIPS mode (see FreeRDP/FreeRDP#3412). Security negotiation with the "
+        "RDP server may fail unless TLS security mode is selected instead."
+);
 
 /* Client plugin arguments */
 const char* GUAC_RDP_CLIENT_ARGS[] = {
@@ -65,6 +76,8 @@ const char* GUAC_RDP_CLIENT_ARGS[] = {
     "server-layout",
     "security",
     "ignore-cert",
+    "cert-tofu",
+    "cert-fingerprints",
     "disable-auth",
     "remote-app",
     "remote-app-dir",
@@ -80,6 +93,7 @@ const char* GUAC_RDP_CLIENT_ARGS[] = {
     "disable-bitmap-caching",
     "disable-offscreen-caching",
     "disable-glyph-caching",
+    "disable-gfx",
     "preconnection-id",
     "preconnection-blob",
     "timezone",
@@ -130,6 +144,7 @@ const char* GUAC_RDP_CLIENT_ARGS[] = {
     "wol-wait-time",
 
     "force-lossless",
+    "normalize-clipboard",
     NULL
 };
 
@@ -277,6 +292,21 @@ enum RDP_ARGS_IDX {
     IDX_IGNORE_CERT,
 
     /**
+     * "true" if a server certificate should be trusted the first time that
+     * a connection is established, and then subsequently checked for validity,
+     * or "false" if that behavior should not be forced. Whether or not the
+     * connection succeeds will be dependent upon other certificate settings,
+     * like ignore and/or provided fingerprints.
+     */
+    IDX_CERTIFICATE_TOFU,
+
+    /**
+     * A comma-separate list of fingerprints of certificates that should be
+     * trusted when establishing this RDP connection.
+     */
+    IDX_CERTIFICATE_FINGERPRINTS,
+
+    /**
      * "true" if authentication should be disabled, "false" or blank otherwise.
      * This is different from the authentication that takes place when a user
      * provides their username and password. Authentication is required by
@@ -359,7 +389,7 @@ enum RDP_ARGS_IDX {
     IDX_DISABLE_BITMAP_CACHING,
 
     /**
-     * "true" if the offscreen caching should be disabled, false if offscren
+     * "true" if the offscreen caching should be disabled, false if offscreen
      * caching should remain enabled.
      */
     IDX_DISABLE_OFFSCREEN_CACHING,
@@ -369,6 +399,13 @@ enum RDP_ARGS_IDX {
      * remain enabled.
      */
     IDX_DISABLE_GLYPH_CACHING,
+
+    /**
+     * "true" if the RDP Graphics Pipeline Extension should not be used, and
+     * traditional RDP graphics should be used instead, "false" or blank if the
+     * Graphics Pipeline Extension should be used if available.
+     */
+    IDX_DISABLE_GFX,
 
     /**
      * The preconnection ID to send within the preconnection PDU when
@@ -647,6 +684,16 @@ enum RDP_ARGS_IDX {
      */
     IDX_FORCE_LOSSLESS,
 
+    /**
+     * Controls whether the text content of the clipboard should be
+     * automatically normalized to use a particular line ending format. Valid
+     * values are "preserve", to preserve line endings verbatim, "windows" to
+     * transform all line endings to Windows-style CRLF sequences, or "unix" to
+     * transform all line endings to Unix-style newline characters ('\n'). By
+     * default, line endings within the clipboard are preserved.
+     */
+    IDX_NORMALIZE_CLIPBOARD,
+
     RDP_ARGS_COUNT
 };
 
@@ -678,6 +725,16 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
         guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_IGNORE_CERT, 0);
 
+    /* Add new certificates to trust list */
+    settings->certificate_tofu =
+        guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_CERTIFICATE_TOFU, 0);
+
+    /* Fingerprints of certificates that should be trusted */
+    settings->certificate_fingerprints =
+        guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_CERTIFICATE_FINGERPRINTS, NULL);
+
     /* Disable authentication */
     settings->disable_authentication =
         guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
@@ -687,12 +744,27 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
     if (strcmp(argv[IDX_SECURITY], "nla") == 0) {
         guac_user_log(user, GUAC_LOG_INFO, "Security mode: NLA");
         settings->security_mode = GUAC_SECURITY_NLA;
+
+        /*
+         * NLA is known not to work with FIPS; allow the mode selection but
+         * warn that it will not work.
+         */
+        if (guac_fips_enabled())
+            guac_user_log(user, GUAC_LOG_WARNING, fips_nla_mode_warning);
+
     }
 
     /* Extended NLA security */
     else if (strcmp(argv[IDX_SECURITY], "nla-ext") == 0) {
         guac_user_log(user, GUAC_LOG_INFO, "Security mode: Extended NLA");
         settings->security_mode = GUAC_SECURITY_EXTENDED_NLA;
+
+        /*
+         * NLA is known not to work with FIPS; allow the mode selection but
+         * warn that it will not work.
+         */
+        if (guac_fips_enabled())
+            guac_user_log(user, GUAC_LOG_WARNING, fips_nla_mode_warning);
     }
 
     /* TLS security */
@@ -896,11 +968,6 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
                 "https://issues.apache.org/jira/browse/GUACAMOLE-1191",
                 GUAC_RDP_CLIENT_ARGS[IDX_DISABLE_GLYPH_CACHING]);
     }
-
-    /* Session color depth */
-    settings->color_depth = 
-        guac_user_parse_args_int(user, GUAC_RDP_CLIENT_ARGS, argv,
-                IDX_COLOR_DEPTH, RDP_DEFAULT_DEPTH);
 
     /* Preconnection ID */
     settings->preconnection_id = -1;
@@ -1118,6 +1185,16 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
         settings->resize_method = GUAC_RESIZE_NONE;
     }
 
+    /* RDP Graphics Pipeline enable/disable */
+    settings->enable_gfx =
+        !guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_DISABLE_GFX, 0);
+
+    /* Session color depth */
+    settings->color_depth =
+        guac_user_parse_args_int(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_COLOR_DEPTH, settings->enable_gfx ? RDP_GFX_REQUIRED_DEPTH : RDP_DEFAULT_DEPTH);
+
     /* Multi-touch input enable/disable */
     settings->enable_touch =
         guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
@@ -1167,7 +1244,36 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
     settings->disable_paste =
         guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_DISABLE_PASTE, 0);
-    
+
+    /* Normalize clipboard line endings to Unix format */
+    if (strcmp(argv[IDX_NORMALIZE_CLIPBOARD], "unix") == 0) {
+        guac_user_log(user, GUAC_LOG_INFO, "Clipboard line ending normalization: Unix (LF)");
+        settings->normalize_clipboard = 1;
+        settings->clipboard_crlf = 0;
+    }
+
+    /* Normalize clipboard line endings to Windows format */
+    else if (strcmp(argv[IDX_NORMALIZE_CLIPBOARD], "windows") == 0) {
+        guac_user_log(user, GUAC_LOG_INFO, "Clipboard line ending normalization: Windows (CRLF)");
+        settings->normalize_clipboard = 1;
+        settings->clipboard_crlf = 1;
+    }
+
+    /* Preserve clipboard line ending format */
+    else if (strcmp(argv[IDX_NORMALIZE_CLIPBOARD], "preserve") == 0) {
+        guac_user_log(user, GUAC_LOG_INFO, "Clipboard line ending normalization: Preserve (none)");
+        settings->normalize_clipboard = 0;
+        settings->clipboard_crlf = 0;
+    }
+
+    /* If nothing given, default to preserving line endings */
+    else {
+        guac_user_log(user, GUAC_LOG_INFO, "No clipboard line-ending normalization specified. Defaulting to preserving the format of all line endings.");
+        settings->normalize_clipboard = 0;
+        settings->clipboard_crlf = 0;
+    }
+
+
     /* Parse Wake-on-LAN (WoL) settings */
     settings->wol_send_packet =
         guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
@@ -1217,6 +1323,7 @@ void guac_rdp_settings_free(guac_rdp_settings* settings) {
     free(settings->drive_name);
     free(settings->drive_path);
     free(settings->hostname);
+    free(settings->certificate_fingerprints);
     free(settings->initial_program);
     free(settings->password);
     free(settings->preconnection_blob);
@@ -1357,6 +1464,29 @@ void guac_rdp_push_settings(guac_client* client,
     /* Explicitly set flag value */
     rdp_settings->PerformanceFlags = guac_rdp_get_performance_flags(guac_settings);
 
+    /* Always request frame markers */
+    rdp_settings->FrameMarkerCommandEnabled = TRUE;
+    rdp_settings->SurfaceFrameMarkerEnabled = TRUE;
+
+    /* Enable RemoteFX / Graphics Pipeline */
+    if (guac_settings->enable_gfx) {
+
+        rdp_settings->SupportGraphicsPipeline = TRUE;
+        rdp_settings->RemoteFxCodec = TRUE;
+
+        if (rdp_settings->ColorDepth != RDP_GFX_REQUIRED_DEPTH) {
+            guac_client_log(client, GUAC_LOG_WARNING, "Ignoring requested "
+                    "color depth of %i bpp, as the RDP Graphics Pipeline "
+                    "requires %i bpp.", rdp_settings->ColorDepth, RDP_GFX_REQUIRED_DEPTH);
+        }
+
+        /* Required for RemoteFX / Graphics Pipeline */
+        rdp_settings->FastPathOutput = TRUE;
+        rdp_settings->ColorDepth = RDP_GFX_REQUIRED_DEPTH;
+        rdp_settings->SoftwareGdi = TRUE;
+
+    }
+
     /* Set individual flags - some FreeRDP versions overwrite the above */
     rdp_settings->AllowFontSmoothing = guac_settings->font_smoothing_enabled;
     rdp_settings->DisableWallpaper = !guac_settings->wallpaper_enabled;
@@ -1453,15 +1583,32 @@ void guac_rdp_push_settings(guac_client* client,
         case GUAC_SECURITY_ANY:
             rdp_settings->RdpSecurity = TRUE;
             rdp_settings->TlsSecurity = TRUE;
-            rdp_settings->NlaSecurity = guac_settings->username && guac_settings->password;
+
+            /* Explicitly disable NLA if FIPS mode is enabled - it won't work */
+            if (guac_fips_enabled()) {
+
+                guac_client_log(client, GUAC_LOG_INFO,
+                        "FIPS mode is enabled. Excluding NLA security mode from security negotiation "
+                        "(see: https://github.com/FreeRDP/FreeRDP/issues/3412).");
+                rdp_settings->NlaSecurity = FALSE;
+
+            }
+
+            /* NLA mode is allowed if FIPS is not enabled */
+            else
+                rdp_settings->NlaSecurity = TRUE;
+
             rdp_settings->ExtSecurity = FALSE;
             break;
 
     }
 
-    /* Authentication */
+    /* Security */
     rdp_settings->Authentication = !guac_settings->disable_authentication;
     rdp_settings->IgnoreCertificate = guac_settings->ignore_certificate;
+    rdp_settings->AutoAcceptCertificate = guac_settings->certificate_tofu;
+    if (guac_settings->certificate_fingerprints != NULL)
+        rdp_settings->CertificateAcceptedFingerprints = guac_strdup(guac_settings->certificate_fingerprints);
 
     /* RemoteApp */
     if (guac_settings->remote_app != NULL) {

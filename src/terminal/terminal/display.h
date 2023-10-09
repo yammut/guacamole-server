@@ -21,7 +21,12 @@
 #ifndef _GUAC_TERMINAL_DISPLAY_H
 #define _GUAC_TERMINAL_DISPLAY_H
 
-#include "config.h"
+/**
+ * Structures and function definitions related to the graphical display.
+ *
+ * @file display.h
+ */
+
 
 #include "common/surface.h"
 #include "palette.h"
@@ -38,6 +43,17 @@
  * The maximum width of any character, in columns.
  */
 #define GUAC_TERMINAL_MAX_CHAR_WIDTH 2
+
+/**
+ * The size of margins between the console text and the border in mm.
+ */
+#define GUAC_TERMINAL_MARGINS 2
+
+/**
+ * 1 inch is 25.4 millimeters, and we can therefore use the following
+ * to create a mm to px formula: (mm × dpi) ÷ 25.4 = px.
+ */
+#define GUAC_TERMINAL_MM_PER_INCH 25.4
 
 /**
  * All available terminal operations which affect character cells.
@@ -117,6 +133,11 @@ typedef struct guac_terminal_display {
      * The height of the screen, in characters.
      */
     int height;
+
+    /**
+     * The size of margins between the console text and the border in pixels.
+     */
+    int margin;
 
     /**
      * The description of the font to use for rendering.
@@ -303,21 +324,23 @@ void guac_terminal_display_resize(guac_terminal_display* display, int width, int
 void guac_terminal_display_flush(guac_terminal_display* display);
 
 /**
- * Initializes and syncs the current terminal display state for the given user
- * that has just joined the connection, sending the necessary instructions to
- * completely recreate and redraw the terminal rendering over the given socket.
+ * Initializes and syncs the current terminal display state for all joining
+ * users associated with the provided socket, sending the necessary instructions
+ * to completely recreate and redraw the terminal rendering over the given
+ * socket.
  *
  * @param display
- *     The terminal display to sync to the given user.
+ *     The terminal display to sync to the users associated with the provided
+ *     socket.
  *
- * @param user
- *     The user that has just joined the connection.
+ * @param client
+ *     The client whose users are joining.
  *
  * @param socket
  *     The socket over which any necessary instructions should be sent.
  */
-void guac_terminal_display_dup(guac_terminal_display* display, guac_user* user,
-        guac_socket* socket);
+void guac_terminal_display_dup(
+        guac_terminal_display* display, guac_client* client, guac_socket* socket);
 
 /**
  * Draws the text selection rectangle from the given coordinates to the given end coordinates.

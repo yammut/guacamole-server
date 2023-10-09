@@ -27,7 +27,6 @@
 #include "common/clipboard.h"
 #include "common/display.h"
 #include "common/list.h"
-#include "common/recording.h"
 #include "common/surface.h"
 #include "config.h"
 #include "fs.h"
@@ -45,6 +44,7 @@
 #include <freerdp/freerdp.h>
 #include <guacamole/audio.h>
 #include <guacamole/client.h>
+#include <guacamole/recording.h>
 #include <winpr/wtypes.h>
 
 #include <pthread.h>
@@ -90,6 +90,24 @@ typedef struct guac_rdp_client {
      * change this surface to allow drawing to occur off-screen.
      */
     guac_common_surface* current_surface;
+
+    /**
+     * Whether the RDP server supports defining explicit frame boundaries.
+     */
+    int frames_supported;
+
+    /**
+     * Whether the RDP server has reported that a new frame is in progress, and
+     * we are now receiving updates relevant to that frame.
+     */
+    int in_frame;
+
+    /**
+     * The number of distinct frames received from the RDP server since last
+     * flush, if the RDP server supports reporting frame boundaries. If the RDP
+     * server does not support tracking frames, this will be zero.
+     */
+    int frames_received;
 
     /**
      * The current state of the keyboard with respect to the RDP session.
@@ -142,7 +160,7 @@ typedef struct guac_rdp_client {
      * The in-progress session recording, or NULL if no recording is in
      * progress.
      */
-    guac_common_recording* recording;
+    guac_recording* recording;
 
     /**
      * Display size update module.

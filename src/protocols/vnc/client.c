@@ -19,7 +19,6 @@
 
 #include "config.h"
 
-#include "common/recording.h"
 #include "client.h"
 #include "user.h"
 #include "vnc.h"
@@ -35,10 +34,67 @@
 #endif
 
 #include <guacamole/client.h>
+#include <guacamole/recording.h>
 
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef ENABLE_PULSE
+/**
+ * Add the provided user to the provided audio stream.
+ *
+ * @param user
+ *    The pending user who should be added to the audio stream.
+ *
+ * @param data
+ *    The audio stream that the user should be added to.
+ *
+ * @return
+ *     Always NULL.
+ */
+static void* guac_vnc_sync_pending_user_audio(guac_user* user, void* data) {
+
+    /* Add the user to the stream */
+    guac_pa_stream* audio = (guac_pa_stream*) data;
+    guac_pa_stream_add_user(audio, user);
+
+    return NULL;
+
+}
+#endif
+
+/**
+ * A pending join handler implementation that will synchronize the connection
+ * state for all pending users prior to them being promoted to full user.
+ *
+ * @param client
+ *     The client whose pending users are about to be promoted.
+ *
+ * @return
+ *     Always zero.
+ */
+static int guac_vnc_join_pending_handler(guac_client* client) {
+
+    guac_vnc_client* vnc_client = (guac_vnc_client*) client->data;
+    guac_socket* broadcast_socket = client->pending_socket;
+
+#ifdef ENABLE_PULSE
+    /* Synchronize any audio stream for each pending user */
+    if (vnc_client->audio)
+        guac_client_foreach_pending_user(
+            client, guac_vnc_sync_pending_user_audio, vnc_client->audio);
+#endif
+
+    /* Synchronize with current display */
+    if (vnc_client->display != NULL) {
+        guac_common_display_dup(vnc_client->display, client, broadcast_socket);
+        guac_socket_flush(broadcast_socket);
+    }
+
+    return 0;
+
+}
 
 int guac_client_init(guac_client* client) {
 
@@ -55,10 +111,11 @@ int guac_client_init(guac_client* client) {
 #endif
 
     /* Init clipboard */
-    vnc_client->clipboard = guac_common_clipboard_alloc(GUAC_VNC_CLIPBOARD_MAX_LENGTH);
+    vnc_client->clipboard = guac_common_clipboard_alloc();
 
     /* Set handlers */
     client->join_handler = guac_vnc_user_join_handler;
+    client->join_pending_handler = guac_vnc_join_pending_handler;
     client->leave_handler = guac_vnc_user_leave_handler;
     client->free_handler = guac_vnc_client_free_handler;
 
@@ -126,7 +183,7 @@ int guac_vnc_client_free_handler(guac_client* client) {
 
     /* Clean up recording, if in progress */
     if (vnc_client->recording != NULL)
-        guac_common_recording_free(vnc_client->recording);
+        guac_recording_free(vnc_client->recording);
 
     /* Free clipboard */
     if (vnc_client->clipboard != NULL)

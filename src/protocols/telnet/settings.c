@@ -22,6 +22,7 @@
 #include "argv.h"
 #include "common/defaults.h"
 #include "settings.h"
+#include "terminal/terminal.h"
 
 #include <guacamole/user.h>
 #include <guacamole/wol-constants.h>
@@ -36,6 +37,7 @@
 const char* GUAC_TELNET_CLIENT_ARGS[] = {
     "hostname",
     "port",
+    "timeout",
     "username",
     "username-regex",
     "password",
@@ -79,6 +81,11 @@ enum TELNET_ARGS_IDX {
      * The port to connect to. Optional.
      */
     IDX_PORT,
+
+    /**
+     * The number of seconds to wait for the remote server to respond. Optional.
+     */
+    IDX_TIMEOUT,
 
     /**
      * The name of the user to login as. Optional.
@@ -192,8 +199,8 @@ enum TELNET_ARGS_IDX {
     IDX_READ_ONLY,
 
     /**
-     * ASCII code, as an integer to use for the backspace key, or 127
-     * if not specified.
+     * ASCII code, as an integer to use for the backspace key, or
+     * GUAC_TERMINAL_DEFAULT_BACKSPACE if not specified.
      */
     IDX_BACKSPACE,
 
@@ -401,22 +408,22 @@ guac_telnet_settings* guac_telnet_parse_args(guac_user* user,
     /* Read maximum scrollback size */
     settings->max_scrollback =
         guac_user_parse_args_int(user, GUAC_TELNET_CLIENT_ARGS, argv,
-                IDX_SCROLLBACK, GUAC_TELNET_DEFAULT_MAX_SCROLLBACK);
+                IDX_SCROLLBACK, GUAC_TERMINAL_DEFAULT_MAX_SCROLLBACK);
 
     /* Read font name */
     settings->font_name =
         guac_user_parse_args_string(user, GUAC_TELNET_CLIENT_ARGS, argv,
-                IDX_FONT_NAME, GUAC_TELNET_DEFAULT_FONT_NAME);
+                IDX_FONT_NAME, GUAC_TERMINAL_DEFAULT_FONT_NAME);
 
     /* Read font size */
     settings->font_size =
         guac_user_parse_args_int(user, GUAC_TELNET_CLIENT_ARGS, argv,
-                IDX_FONT_SIZE, GUAC_TELNET_DEFAULT_FONT_SIZE);
+                IDX_FONT_SIZE, GUAC_TERMINAL_DEFAULT_FONT_SIZE);
 
     /* Copy requested color scheme */
     settings->color_scheme =
         guac_user_parse_args_string(user, GUAC_TELNET_CLIENT_ARGS, argv,
-                IDX_COLOR_SCHEME, "");
+                IDX_COLOR_SCHEME, GUAC_TERMINAL_DEFAULT_COLOR_SCHEME);
 
     /* Pull width/height/resolution directly from user */
     settings->width      = user->info.optimal_width;
@@ -427,6 +434,11 @@ guac_telnet_settings* guac_telnet_parse_args(guac_user* user,
     settings->port =
         guac_user_parse_args_string(user, GUAC_TELNET_CLIENT_ARGS, argv,
                 IDX_PORT, GUAC_TELNET_DEFAULT_PORT);
+
+    /* Read connection timeout */
+    settings->timeout =
+        guac_user_parse_args_int(user, GUAC_TELNET_CLIENT_ARGS, argv,
+                IDX_TIMEOUT, GUAC_TELNET_DEFAULT_TIMEOUT);
 
     /* Read typescript path */
     settings->typescript_path =
@@ -476,7 +488,7 @@ guac_telnet_settings* guac_telnet_parse_args(guac_user* user,
     /* Parse backspace key code */
     settings->backspace =
         guac_user_parse_args_int(user, GUAC_TELNET_CLIENT_ARGS, argv,
-                IDX_BACKSPACE, 127);
+                IDX_BACKSPACE, GUAC_TERMINAL_DEFAULT_BACKSPACE);
 
     /* Read terminal emulator type. */
     settings->terminal_type =

@@ -28,6 +28,7 @@
 #include "guacamole/plugin.h"
 #include "guacamole/pool.h"
 #include "guacamole/protocol.h"
+#include "guacamole/rwlock.h"
 #include "guacamole/socket.h"
 #include "guacamole/stream.h"
 #include "guacamole/string.h"
@@ -36,12 +37,38 @@
 #include "id.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/**
+ * The number of nanoseconds between times that the pending users list will be
+ * synchronized and emptied (250 milliseconds aka 1/4 second).
+ */
+#define GUAC_CLIENT_PENDING_USERS_REFRESH_INTERVAL 250000000
+
+/**
+ * A value that indicates that the pending users timer has yet to be
+ * initialized and started.
+ */
+#define GUAC_CLIENT_PENDING_TIMER_UNREGISTERED 0
+
+/**
+ * A value that indicates that the pending users timer has been initialized
+ * and started, but that the timer handler is not currently running.
+ */
+#define GUAC_CLIENT_PENDING_TIMER_REGISTERED 1
+
+/**
+ * A value that indicates that the pending users timer has been initialized
+ * and started, and that the timer handler is currently running.
+ */
+#define GUAC_CLIENT_PENDING_TIMER_TRIGGERED 2
 
 /**
  * Empty NULL-terminated array of argument names.
@@ -128,10 +155,104 @@ void guac_client_free_stream(guac_client* client, guac_stream* stream) {
 
 }
 
+/**
+ * Promote all pending users to full users, calling the join pending handler
+ * before, if any.
+ *
+ * @param data
+ *     The client for which all pending users should be promoted.
+ */
+static void guac_client_promote_pending_users(union sigval data) {
+
+    guac_client* client = (guac_client*) data.sival_ptr;
+
+    pthread_mutex_lock(&(client->__pending_users_timer_mutex));
+
+    /* Check if the previous instance of this handler is still running */
+    int already_running = (
+            client->__pending_users_timer_state
+            == GUAC_CLIENT_PENDING_TIMER_TRIGGERED);
+
+    /* Mark the handler as running if it isn't already */
+    client->__pending_users_timer_state = GUAC_CLIENT_PENDING_TIMER_TRIGGERED;
+
+    pthread_mutex_unlock(&(client->__pending_users_timer_mutex));
+
+    /* Do not start the handler if the previous instance is still running */
+    if (already_running)
+        return;
+
+    /* Acquire the lock for reading and modifying the list of pending users */
+    guac_rwlock_acquire_write_lock(&(client->__pending_users_lock));
+
+    /* Skip user promotion entirely if there's no pending users */
+    if (client->__pending_users == NULL)
+        goto promotion_complete;
+
+    /* Run the pending join handler, if one is defined */
+    if (client->join_pending_handler) {
+
+        /* If an error occurs in the pending handler */
+        if(client->join_pending_handler(client)) {
+
+            /* Log a warning and abort the promotion of the pending users */
+            guac_client_log(client, GUAC_LOG_WARNING,
+                    "join_pending_handler did not successfully complete;"
+                    " any pending users have not been promoted.\n");
+
+            goto promotion_complete;
+        }
+    }
+
+    /* The first pending user in the list, if any */
+    guac_user* first_user = client->__pending_users;
+
+    /* The final user in the list, if any */
+    guac_user* last_user = first_user;
+
+    /* Iterate through the pending users to find the final user */
+    guac_user* user = first_user;
+    while (user != NULL) {
+        last_user = user;
+        user = user->__next;
+    }
+
+    /* Mark the list as empty */
+    client->__pending_users = NULL;
+
+    /* Acquire the lock for reading and modifying the list of full users. */
+    guac_rwlock_acquire_write_lock(&(client->__users_lock));
+
+    /* If any users were removed from the pending list, promote them now */
+    if (last_user != NULL) {
+
+        /* Add all formerly-pending users to the start of the user list */
+        if (client->__users != NULL)
+            client->__users->__prev = last_user;
+
+        last_user->__next = client->__users;
+        client->__users = first_user;
+
+    }
+
+    guac_rwlock_release_lock(&(client->__users_lock));
+
+promotion_complete:
+
+    /* Release the lock (this is done AFTER updating the connected user list
+     * to ensure that all users are always on exactly one of these lists) */
+    guac_rwlock_release_lock(&(client->__pending_users_lock));
+
+    /* Mark the handler as complete so the next instance can run */
+    pthread_mutex_lock(&(client->__pending_users_timer_mutex));
+    client->__pending_users_timer_state = GUAC_CLIENT_PENDING_TIMER_REGISTERED;
+    pthread_mutex_unlock(&(client->__pending_users_timer_mutex));
+
+}
+
 guac_client* guac_client_alloc() {
 
     int i;
-    pthread_rwlockattr_t lock_attributes;
 
     /* Allocate new client */
     guac_client* client = malloc(sizeof(guac_client));
@@ -169,15 +290,23 @@ guac_client* guac_client_alloc() {
         client->__output_streams[i].index = GUAC_CLIENT_CLOSED_STREAM_INDEX;
     }
 
-
     /* Init locks */
-    pthread_rwlockattr_init(&lock_attributes);
-    pthread_rwlockattr_setpshared(&lock_attributes, PTHREAD_PROCESS_SHARED);
+    guac_rwlock_init(&(client->__users_lock));
+    guac_rwlock_init(&(client->__pending_users_lock));
 
-    pthread_rwlock_init(&(client->__users_lock), &lock_attributes);
+    /* Initialize the write lock flags to 0, as threads won't have yet */
+    pthread_key_create(&(client->__users_lock.key), (void *) 0);
+    pthread_key_create(&(client->__pending_users_lock.key), (void *) 0);
 
-    /* Set up socket to broadcast to all users */
+    /* The timer will be lazily created in the child process */
+    client->__pending_users_timer_state = GUAC_CLIENT_PENDING_TIMER_UNREGISTERED;
+
+    /* Set up the pending user promotion mutex */
+    pthread_mutex_init(&(client->__pending_users_timer_mutex), NULL);
+
+    /* Set up broadcast sockets */
     client->socket = guac_socket_broadcast(client);
+    client->pending_socket = guac_socket_broadcast_pending(client);
 
     return client;
 
@@ -185,9 +314,21 @@ guac_client* guac_client_alloc() {
 
 void guac_client_free(guac_client* client) {
 
+    /* Acquire write locks before referencing user pointers */
+    guac_rwlock_acquire_write_lock(&(client->__pending_users_lock));
+    guac_rwlock_acquire_write_lock(&(client->__users_lock));
+
+    /* Remove all pending users */
+    while (client->__pending_users != NULL)
+        guac_client_remove_user(client, client->__pending_users);
+
     /* Remove all users */
     while (client->__users != NULL)
         guac_client_remove_user(client, client->__users);
+
+    /* Release the locks */
+    guac_rwlock_release_lock(&(client->__users_lock));
+    guac_rwlock_release_lock(&(client->__pending_users_lock));
 
     if (client->free_handler) {
 
@@ -196,8 +337,9 @@ void guac_client_free(guac_client* client) {
 
     }
 
-    /* Free socket */
+    /* Free sockets */
     guac_socket_free(client->socket);
+    guac_socket_free(client->pending_socket);
 
     /* Free layer pools */
     guac_pool_free(client->__buffer_pool);
@@ -215,7 +357,23 @@ void guac_client_free(guac_client* client) {
             guac_client_log(client, GUAC_LOG_ERROR, "Unable to close plugin: %s", dlerror());
     }
 
-    pthread_rwlock_destroy(&(client->__users_lock));
+    /* Find out if the pending user promotion timer was ever started */
+    pthread_mutex_lock(&(client->__pending_users_timer_mutex));
+    int was_started = (
+            client->__pending_users_timer_state
+            != GUAC_CLIENT_PENDING_TIMER_UNREGISTERED);
+    pthread_mutex_unlock(&(client->__pending_users_timer_mutex));
+
+    /* If the timer was registered, stop it before destroying the lock */
+    if (was_started)
+        timer_delete(client->__pending_users_timer);
+
+    pthread_mutex_destroy(&(client->__pending_users_timer_mutex));
+
+    /* Destroy the reentrant read-write locks */
+    guac_rwlock_destroy(&(client->__users_lock));
+    guac_rwlock_destroy(&(client->__pending_users_lock));
+
     free(client->connection_id);
     free(client);
 }
@@ -277,7 +435,115 @@ void guac_client_abort(guac_client* client, guac_protocol_status status,
 
 }
 
+/**
+ * Add the provided user to the list of pending users who have yet to have
+ * their connection state synchronized after joining, for the connection
+ * associated with the given guac client.
+ *
+ * @param client
+ *     The client associated with the connection for which the provided user
+ *     is pending a connection state synchronization after joining.
+ *
+ * @param user
+ *     The user to add to the pending list.
+ */
+static void guac_client_add_pending_user(
+        guac_client* client, guac_user* user) {
+
+    /* Acquire the lock for modifying the list of pending users */
+    guac_rwlock_acquire_write_lock(&(client->__pending_users_lock));
+
+    user->__prev = NULL;
+    user->__next = client->__pending_users;
+
+    if (client->__pending_users != NULL)
+        client->__pending_users->__prev = user;
+
+    client->__pending_users = user;
+
+    /* Increment the user count */
+    client->connected_users++;
+
+    /* Release the lock */
+    guac_rwlock_release_lock(&(client->__pending_users_lock));
+
+}
+
+/**
+ * Periodically promote pending users to full users. Returns zero if the timer
+ * is already running, or successfully created, or a non-zero value if the
+ * timer could not be created and started.
+ *
+ * @param client
+ *     The guac client for which the new timer should be started, if not
+ *     already running.
+ *
+ * @return
+ *     Zero if the timer was successfully created and started, or a negative
+ *     value otherwise.
+ */
+static int guac_client_start_pending_users_timer(guac_client* client) {
+
+    pthread_mutex_lock(&(client->__pending_users_timer_mutex));
+
+    /* Return success if the timer is already created and running */
+    if (client->__pending_users_timer_state
+            != GUAC_CLIENT_PENDING_TIMER_UNREGISTERED) {
+        pthread_mutex_unlock(&(client->__pending_users_timer_mutex));
+        return 0;
+    }
+
+    /* Configure the timer to synchronize and clear the pending users */
+    struct sigevent signal_config = {
+            .sigev_notify = SIGEV_THREAD,
+            .sigev_notify_function = guac_client_promote_pending_users,
+            .sigev_value = { .sival_ptr = client }};
+
+    /* Create a timer to synchronize any pending users periodically */
+    if (timer_create(
+            CLOCK_MONOTONIC,
+            &signal_config,
+            &(client->__pending_users_timer))) {
+        pthread_mutex_unlock(&(client->__pending_users_timer_mutex));
+        return 1;
+    }
+
+    /* Configure the pending users timer to run on the defined interval */
+    struct itimerspec time_config = {
+        .it_interval = { .tv_nsec = GUAC_CLIENT_PENDING_USERS_REFRESH_INTERVAL },
+        .it_value = { .tv_nsec = GUAC_CLIENT_PENDING_USERS_REFRESH_INTERVAL }
+    };
+
+    /* Start the timer */
+    if (timer_settime(
+            client->__pending_users_timer, 0, &time_config, NULL) < 0) {
+        timer_delete(client->__pending_users_timer);
+        pthread_mutex_unlock(&(client->__pending_users_timer_mutex));
+        return 1;
+    }
+
+    /* Mark the timer as registered but not yet running */
+    client->__pending_users_timer_state = GUAC_CLIENT_PENDING_TIMER_REGISTERED;
+
+    pthread_mutex_unlock(&(client->__pending_users_timer_mutex));
+    return 0;
+
+}
+
 int guac_client_add_user(guac_client* client, guac_user* user, int argc, char** argv) {
+
+    /* Create and start the timer if it hasn't already been initialized */
+    if (guac_client_start_pending_users_timer(client)) {
+
+        /**
+         *
+         * If the timer could not be created, do not add the user - they cannot
+         * be synchronized without the timer.
+         */
+        guac_client_log(client, GUAC_LOG_ERROR,
+                "Could not start pending user timer: %s.", strerror(errno));
+        return 1;
+    }
 
     int retval = 0;
 
@@ -285,19 +551,13 @@ int guac_client_add_user(guac_client* client, guac_user* user, int argc, char** 
     if (client->join_handler)
         retval = client->join_handler(user, argc, argv);
 
-    pthread_rwlock_wrlock(&(client->__users_lock));
-
-    /* Add to list if join was successful */
     if (retval == 0) {
 
-        user->__prev = NULL;
-        user->__next = client->__users;
-
-        if (client->__users != NULL)
-            client->__users->__prev = user;
-
-        client->__users = user;
-        client->connected_users++;
+        /*
+         * Add the user to the list of pending users, to have their connection
+         * state synchronized asynchronously.
+         */
+        guac_client_add_pending_user(client, user);
 
         /* Update owner pointer if user is owner */
         if (user->owner)
@@ -305,7 +565,9 @@ int guac_client_add_user(guac_client* client, guac_user* user, int argc, char** 
 
     }
 
-    pthread_rwlock_unlock(&(client->__users_lock));
+    /* Notify owner of user joining connection. */
+    if (retval == 0 && !user->owner)
+        guac_client_owner_notify_join(client, user);
 
     return retval;
 
@@ -313,13 +575,16 @@ int guac_client_add_user(guac_client* client, guac_user* user, int argc, char** 
 
 void guac_client_remove_user(guac_client* client, guac_user* user) {
 
-    pthread_rwlock_wrlock(&(client->__users_lock));
+    guac_rwlock_acquire_write_lock(&(client->__pending_users_lock));
+    guac_rwlock_acquire_write_lock(&(client->__users_lock));
 
     /* Update prev / head */
     if (user->__prev != NULL)
         user->__prev->__next = user->__next;
-    else
+    else if (client->__users == user)
         client->__users = user->__next;
+    else if (client->__pending_users == user)
+        client->__pending_users = user->__next;
 
     /* Update next */
     if (user->__next != NULL)
@@ -331,7 +596,12 @@ void guac_client_remove_user(guac_client* client, guac_user* user) {
     if (user->owner)
         client->__owner = NULL;
 
-    pthread_rwlock_unlock(&(client->__users_lock));
+    guac_rwlock_release_lock(&(client->__users_lock));
+    guac_rwlock_release_lock(&(client->__pending_users_lock));
+
+    /* Update owner of user having left the connection. */
+    if (!user->owner)
+        guac_client_owner_notify_leave(client, user);
 
     /* Call handler, if defined */
     if (user->leave_handler)
@@ -345,7 +615,7 @@ void guac_client_foreach_user(guac_client* client, guac_user_callback* callback,
 
     guac_user* current;
 
-    pthread_rwlock_rdlock(&(client->__users_lock));
+    guac_rwlock_acquire_read_lock(&(client->__users_lock));
 
     /* Call function on each user */
     current = client->__users;
@@ -354,7 +624,25 @@ void guac_client_foreach_user(guac_client* client, guac_user_callback* callback,
         current = current->__next;
     }
 
-    pthread_rwlock_unlock(&(client->__users_lock));
+    guac_rwlock_release_lock(&(client->__users_lock));
+
+}
+
+void guac_client_foreach_pending_user(
+        guac_client* client, guac_user_callback* callback, void* data) {
+
+    guac_user* current;
+
+    guac_rwlock_acquire_read_lock(&(client->__pending_users_lock));
+
+    /* Call function on each pending user */
+    current = client->__pending_users;
+    while (current != NULL) {
+        callback(current, data);
+        current = current->__next;
+    }
+
+    guac_rwlock_release_lock(&(client->__pending_users_lock));
 
 }
 
@@ -363,12 +651,12 @@ void* guac_client_for_owner(guac_client* client, guac_user_callback* callback,
 
     void* retval;
 
-    pthread_rwlock_rdlock(&(client->__users_lock));
+    guac_rwlock_acquire_read_lock(&(client->__users_lock));
 
     /* Invoke callback with current owner */
     retval = callback(client->__owner, data);
 
-    pthread_rwlock_unlock(&(client->__users_lock));
+    guac_rwlock_release_lock(&(client->__users_lock));
 
     /* Return value from callback */
     return retval;
@@ -383,7 +671,7 @@ void* guac_client_for_user(guac_client* client, guac_user* user,
     int user_valid = 0;
     void* retval;
 
-    pthread_rwlock_rdlock(&(client->__users_lock));
+    guac_rwlock_acquire_read_lock(&(client->__users_lock));
 
     /* Loop through all users, searching for a pointer to the given user */
     current = client->__users;
@@ -405,7 +693,7 @@ void* guac_client_for_user(guac_client* client, guac_user* user,
     /* Invoke callback with requested user (if they exist) */
     retval = callback(user, data);
 
-    pthread_rwlock_unlock(&(client->__users_lock));
+    guac_rwlock_release_lock(&(client->__users_lock));
 
     /* Return value from callback */
     return retval;
@@ -413,15 +701,19 @@ void* guac_client_for_user(guac_client* client, guac_user* user,
 }
 
 int guac_client_end_frame(guac_client* client) {
+    return guac_client_end_multiple_frames(client, 0);
+}
+
+int guac_client_end_multiple_frames(guac_client* client, int frames) {
 
     /* Update and send timestamp */
     client->last_sent_timestamp = guac_timestamp_current();
 
     /* Log received timestamp and calculated lag (at TRACE level only) */
     guac_client_log(client, GUAC_LOG_TRACE, "Server completed "
-            "frame %" PRIu64 "ms.", client->last_sent_timestamp);
+            "frame %" PRIu64 "ms (%i logical frames)", client->last_sent_timestamp, frames);
 
-    return guac_protocol_send_sync(client->socket, client->last_sent_timestamp);
+    return guac_protocol_send_sync(client->socket, client->last_sent_timestamp, frames);
 
 }
 
@@ -672,6 +964,36 @@ static void* __webp_support_callback(guac_user* user, void* data) {
 #endif
 
 /**
+ * A callback function which is invoked by guac_client_owner_supports_msg()
+ * to determine if the owner of a client supports the "msg" instruction,
+ * returning zero if the user does not support the instruction or non-zero if
+ * the user supports it.
+ * 
+ * @param user
+ *     The guac_user that will be checked for "msg" instruction support.
+ * 
+ * @param data
+ *     Data provided to the callback. This value is never used within this
+ *     callback.
+ * 
+ * @return
+ *     A non-zero integer if the provided user who owns the connection supports
+ *     the "msg" instruction, or zero if the user does not. The integer is cast
+ *     as a void*.
+ */
+static void* guac_owner_supports_msg_callback(guac_user* user, void* data) {
+
+    return (void*) ((intptr_t) guac_user_supports_msg(user));
+
+}
+
+int guac_client_owner_supports_msg(guac_client* client) {
+
+    return (int) ((intptr_t) guac_client_for_owner(client, guac_owner_supports_msg_callback, NULL));
+
+}
+
+/**
  * A callback function which is invoked by guac_client_owner_supports_required()
  * to determine if the owner of a client supports the "required" instruction,
  * returning zero if the user does not support the instruction or non-zero if
@@ -699,6 +1021,124 @@ int guac_client_owner_supports_required(guac_client* client) {
     
     return (int) ((intptr_t) guac_client_for_owner(client, guac_owner_supports_required_callback, NULL));
     
+}
+
+/**
+ * A callback function that is invokved by guac_client_owner_notify_join() to
+ * notify the owner of a connection that another user has joined the
+ * connection, returning zero if the message is sent successfully, or non-zero
+ * if an error occurs.
+ *
+ * @param user
+ *     The user to send the notification to, which will be the owner of the
+ *     connection.
+ *
+ * @param data
+ *     The data provided to the callback, which is the user that is joining the
+ *     connection.
+ *
+ * @return
+ *     Zero if the message is sent successfully to the owner, otherwise
+ *     non-zero, cast as a void*.
+ */
+static void* guac_client_owner_notify_join_callback(guac_user* user, void* data) {
+
+    const guac_user* joiner = (const guac_user *) data;
+
+    if (user == NULL)
+        return (void*) ((intptr_t) -1);
+
+    char* log_owner = "owner";
+    if (user->info.name != NULL)
+        log_owner = (char *) user->info.name;
+
+    char* log_joiner = "anonymous";
+    char* send_joiner = "";
+    if (joiner->info.name != NULL) {
+        log_joiner = (char *) joiner->info.name;
+        send_joiner = (char *) joiner->info.name;
+    }
+
+    guac_user_log(user, GUAC_LOG_DEBUG, "Notifying owner \"%s\" of \"%s\" joining.",
+            log_owner, log_joiner);
+    
+    /* Send user joined notification to owner. */
+    const char* args[] = { (const char*)joiner->user_id, (const char*)send_joiner, NULL };
+    return (void*) ((intptr_t) guac_protocol_send_msg(user->socket, GUAC_MESSAGE_USER_JOINED, args));
+
+}
+
+int guac_client_owner_notify_join(guac_client* client, guac_user* joiner) {
+
+    /* Don't send msg instruction if client does not support it. */
+    if (!guac_client_owner_supports_msg(client)) {
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                        "Client does not support the \"msg\" instruction and "
+                        "will not be notified of the user joining the connection.");
+        return -1;
+    }
+
+    return (int) ((intptr_t) guac_client_for_owner(client, guac_client_owner_notify_join_callback, joiner));
+
+}
+
+/**
+ * A callback function that is invokved by guac_client_owner_notify_leave() to
+ * notify the owner of a connection that another user has left the connection,
+ * returning zero if the message is sent successfully, or non-zero
+ * if an error occurs.
+ *
+ * @param user
+ *     The user to send the notification to, which will be the owner of the
+ *     connection.
+ *
+ * @param data
+ *     The data provided to the callback, which is the user that is leaving the
+ *     connection.
+ *
+ * @return
+ *     Zero if the message is sent successfully to the owner, otherwise
+ *     non-zero, cast as a void*.
+ */
+static void* guac_client_owner_notify_leave_callback(guac_user* user, void* data) {
+
+    const guac_user* quitter = (const guac_user *) data;
+
+    if (user == NULL)
+        return (void*) ((intptr_t) -1);
+
+    char* log_owner = "owner";
+    if (user->info.name != NULL)
+        log_owner = (char *) user->info.name;
+
+    char* log_quitter = "anonymous";
+    char* send_quitter = "";
+    if (quitter->info.name != NULL) {
+        log_quitter = (char *) quitter->info.name;
+        send_quitter = (char *) quitter->info.name;
+    }
+
+    guac_user_log(user, GUAC_LOG_DEBUG, "Notifying owner \"%s\" of \"%s\" leaving.",
+            log_owner, log_quitter);
+    
+    /* Send user left notification to owner. */
+    const char* args[] = { (const char*)quitter->user_id, (const char*)send_quitter, NULL };
+    return (void*) ((intptr_t) guac_protocol_send_msg(user->socket, GUAC_MESSAGE_USER_LEFT, args));
+
+}
+
+int guac_client_owner_notify_leave(guac_client* client, guac_user* quitter) {
+
+    /* Don't send msg instruction if client does not support it. */
+    if (!guac_client_owner_supports_msg(client)) {
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                        "Client does not support the \"msg\" instruction and "
+                        "will not be notified of the user leaving the connection.");
+        return -1;
+    }
+
+    return (int) ((intptr_t) guac_client_for_owner(client, guac_client_owner_notify_leave_callback, quitter));
+
 }
 
 int guac_client_supports_webp(guac_client* client) {

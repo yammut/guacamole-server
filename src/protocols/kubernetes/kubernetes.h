@@ -21,12 +21,12 @@
 #define GUAC_KUBERNETES_H
 
 #include "common/clipboard.h"
-#include "common/recording.h"
 #include "io.h"
 #include "settings.h"
 #include "terminal/terminal.h"
 
 #include <guacamole/client.h>
+#include <guacamole/recording.h>
 #include <libwebsockets.h>
 
 #include <pthread.h>
@@ -103,11 +103,6 @@ typedef struct guac_kubernetes_client {
     pthread_t client_thread;
 
     /**
-     * The current clipboard contents.
-     */
-    guac_common_clipboard* clipboard;
-
-    /**
      * The terminal which will render all output from the Kubernetes pod.
      */
     guac_terminal* term;
@@ -128,7 +123,7 @@ typedef struct guac_kubernetes_client {
      * The in-progress session recording, or NULL if no recording is in
      * progress.
      */
-    guac_common_recording* recording;
+    guac_recording* recording;
 
 } guac_kubernetes_client;
 

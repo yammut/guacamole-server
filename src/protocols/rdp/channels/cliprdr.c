@@ -352,22 +352,23 @@ static UINT guac_rdp_cliprdr_format_data_request(CliprdrClientContext* cliprdr,
 
     guac_client* client = clipboard->client;
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
+    guac_rdp_settings* settings = rdp_client->settings;
 
     guac_client_log(client, GUAC_LOG_TRACE, "CLIPRDR: Received format data request.");
 
-    guac_iconv_write* writer;
+    guac_iconv_write* remote_writer;
     const char* input = clipboard->clipboard->buffer;
-    char* output = malloc(GUAC_RDP_CLIPBOARD_MAX_LENGTH);
+    char* output = malloc(GUAC_COMMON_CLIPBOARD_MAX_LENGTH);
 
     /* Map requested clipboard format to a guac_iconv writer */
     switch (format_data_request->requestedFormatId) {
 
         case CF_TEXT:
-            writer = GUAC_WRITE_CP1252;
+            remote_writer = settings->clipboard_crlf ? GUAC_WRITE_CP1252_CRLF : GUAC_WRITE_CP1252;
             break;
 
         case CF_UNICODETEXT:
-            writer = GUAC_WRITE_UTF16;
+            remote_writer = settings->clipboard_crlf ? GUAC_WRITE_UTF16_CRLF : GUAC_WRITE_UTF16;
             break;
 
         /* Warn if clipboard data cannot be sent as intended due to a violation
@@ -386,8 +387,9 @@ static UINT guac_rdp_cliprdr_format_data_request(CliprdrClientContext* cliprdr,
     /* Send received clipboard data to the RDP server in the format
      * requested */
     BYTE* start = (BYTE*) output;
-    guac_iconv(GUAC_READ_UTF8, &input, clipboard->clipboard->length,
-               writer, &output, GUAC_RDP_CLIPBOARD_MAX_LENGTH);
+    guac_iconv_read* local_reader = settings->normalize_clipboard ? GUAC_READ_UTF8_NORMALIZED : GUAC_READ_UTF8;
+    guac_iconv(local_reader, &input, clipboard->clipboard->length,
+            remote_writer, &output, GUAC_COMMON_CLIPBOARD_MAX_LENGTH);
 
     CLIPRDR_FORMAT_DATA_RESPONSE data_response = {
         .requestedFormatData = (BYTE*) start,
@@ -447,9 +449,9 @@ static UINT guac_rdp_cliprdr_format_data_response(CliprdrClientContext* cliprdr,
         return CHANNEL_RC_OK;
     }
 
-    char received_data[GUAC_RDP_CLIPBOARD_MAX_LENGTH];
+    char received_data[GUAC_COMMON_CLIPBOARD_MAX_LENGTH];
 
-    guac_iconv_read* reader;
+    guac_iconv_read* remote_reader;
     const char* input = (char*) format_data_response->requestedFormatData;
     char* output = received_data;
 
@@ -458,12 +460,12 @@ static UINT guac_rdp_cliprdr_format_data_response(CliprdrClientContext* cliprdr,
 
         /* Non-Unicode (Windows CP-1252) */
         case CF_TEXT:
-            reader = GUAC_READ_CP1252;
+            remote_reader = settings->normalize_clipboard ? GUAC_READ_CP1252_NORMALIZED : GUAC_READ_CP1252;
             break;
 
         /* Unicode (UTF-16) */
         case CF_UNICODETEXT:
-            reader = GUAC_READ_UTF16;
+            remote_reader = settings->normalize_clipboard ? GUAC_READ_UTF16_NORMALIZED : GUAC_READ_UTF16;
             break;
 
         /* If the format ID stored within the guac_rdp_clipboard structure is actually
@@ -481,7 +483,7 @@ static UINT guac_rdp_cliprdr_format_data_response(CliprdrClientContext* cliprdr,
 
     /* Convert, store, and forward the clipboard data received from RDP
      * server */
-    if (guac_iconv(reader, &input, format_data_response->dataLen,
+    if (guac_iconv(remote_reader, &input, format_data_response->dataLen,
             GUAC_WRITE_UTF8, &output, sizeof(received_data))) {
         int length = strnlen(received_data, sizeof(received_data));
         guac_common_clipboard_reset(clipboard->clipboard, "text/plain");
@@ -507,12 +509,12 @@ static UINT guac_rdp_cliprdr_format_data_response(CliprdrClientContext* cliprdr,
  * @param context
  *     The rdpContext associated with the active RDP session.
  *
- * @param e
+ * @param args
  *     Event-specific arguments, mainly the name of the channel, and a
  *     reference to the associated plugin loaded for that channel by FreeRDP.
  */
 static void guac_rdp_cliprdr_channel_connected(rdpContext* context,
-        ChannelConnectedEventArgs* e) {
+        ChannelConnectedEventArgs* args) {
 
     guac_client* client = ((rdp_freerdp_context*) context)->client;
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
@@ -524,12 +526,12 @@ static void guac_rdp_cliprdr_channel_connected(rdpContext* context,
     assert(clipboard != NULL);
 
     /* Ignore connection event if it's not for the CLIPRDR channel */
-    if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) != 0)
+    if (strcmp(args->name, CLIPRDR_SVC_CHANNEL_NAME) != 0)
         return;
 
     /* The structure pointed to by pInterface is guaranteed to be a
      * CliprdrClientContext if the channel is CLIPRDR */
-    CliprdrClientContext* cliprdr = (CliprdrClientContext*) e->pInterface;
+    CliprdrClientContext* cliprdr = (CliprdrClientContext*) args->pInterface;
 
     /* Associate FreeRDP CLIPRDR context and its Guacamole counterpart with
      * eachother */
@@ -560,12 +562,12 @@ static void guac_rdp_cliprdr_channel_connected(rdpContext* context,
  * @param context
  *     The rdpContext associated with the active RDP session.
  *
- * @param e
+ * @param args
  *     Event-specific arguments, mainly the name of the channel, and a
  *     reference to the associated plugin loaded for that channel by FreeRDP.
  */
 static void guac_rdp_cliprdr_channel_disconnected(rdpContext* context,
-        ChannelDisconnectedEventArgs* e) {
+        ChannelDisconnectedEventArgs* args) {
 
     guac_client* client = ((rdp_freerdp_context*) context)->client;
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
@@ -577,7 +579,7 @@ static void guac_rdp_cliprdr_channel_disconnected(rdpContext* context,
     assert(clipboard != NULL);
 
     /* Ignore disconnection event if it's not for the CLIPRDR channel */
-    if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) != 0)
+    if (strcmp(args->name, CLIPRDR_SVC_CHANNEL_NAME) != 0)
         return;
 
     /* Channel is no longer connected */
@@ -593,7 +595,7 @@ guac_rdp_clipboard* guac_rdp_clipboard_alloc(guac_client* client) {
     /* Allocate clipboard and underlying storage */
     guac_rdp_clipboard* clipboard = calloc(1, sizeof(guac_rdp_clipboard));
     clipboard->client = client;
-    clipboard->clipboard = guac_common_clipboard_alloc(GUAC_RDP_CLIPBOARD_MAX_LENGTH);
+    clipboard->clipboard = guac_common_clipboard_alloc();
     clipboard->requested_format = CF_TEXT;
 
     return clipboard;

@@ -59,6 +59,11 @@
 #define RDP_DEFAULT_DEPTH  16 
 
 /**
+ * The color depth required by the RDPGFX channel, in bits.
+ */
+#define RDP_GFX_REQUIRED_DEPTH 32
+
+/**
  * The filename to use for the screen recording, if not specified.
  */
 #define GUAC_RDP_DEFAULT_RECORDING_NAME "recording"
@@ -282,6 +287,18 @@ typedef struct guac_rdp_settings {
     int ignore_certificate;
 
     /**
+     * Whether or not a certificate should be added to the local trust
+     * store on first use.
+     */
+    int certificate_tofu;
+
+    /**
+     * The fingerprints of host certificates that should be trusted for
+     * this connection.
+     */
+    char* certificate_fingerprints;
+
+    /**
      * Whether authentication should be disabled. This is different from the
      * authentication that takes place when a user provides their username
      * and password. Authentication is required by definition for NLA.
@@ -322,6 +339,19 @@ typedef struct guac_rdp_settings {
      * the clipboard.
      */
     int disable_paste;
+
+    /**
+     * Whether line endings within the clipboard should be automatically
+     * normalized to Unix-style newline characters.
+     */
+    int normalize_clipboard;
+
+    /**
+     * Whether Unix-style newline characters within the clipboard should be
+     * automatically translated to CRLF sequences before transmission to the
+     * RDP server.
+     */
+    int clipboard_crlf;
 
     /**
      * Whether the desktop wallpaper should be visible. If unset, the desktop
@@ -538,6 +568,11 @@ typedef struct guac_rdp_settings {
      * Whether audio input (microphone) is enabled.
      */
     int enable_audio_input;
+
+    /**
+     * Whether the RDP Graphics Pipeline Extension is enabled.
+     */
+    int enable_gfx;
 
     /**
      * Whether multi-touch support is enabled.

@@ -19,6 +19,7 @@
 
 #include "channels/disp.h"
 #include "plugins/channels.h"
+#include "fs.h"
 #include "rdp.h"
 #include "settings.h"
 
@@ -67,19 +68,19 @@ void guac_rdp_disp_free(guac_rdp_disp* disp) {
  * @param context
  *     The rdpContext associated with the active RDP session.
  *
- * @param e
+ * @param args
  *     Event-specific arguments, mainly the name of the channel, and a
  *     reference to the associated plugin loaded for that channel by FreeRDP.
  */
 static void guac_rdp_disp_channel_connected(rdpContext* context,
-        ChannelConnectedEventArgs* e) {
+        ChannelConnectedEventArgs* args) {
 
     guac_client* client = ((rdp_freerdp_context*) context)->client;
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
     guac_rdp_disp* guac_disp = rdp_client->disp;
 
     /* Ignore connection event if it's not for the Display Update channel */
-    if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) != 0)
+    if (strcmp(args->name, DISP_DVC_CHANNEL_NAME) != 0)
         return;
 
     /* Init module with current display size */
@@ -88,7 +89,7 @@ static void guac_rdp_disp_channel_connected(rdpContext* context,
             guac_rdp_get_height(context->instance));
 
     /* Store reference to the display update plugin once it's connected */
-    DispClientContext* disp = (DispClientContext*) e->pInterface;
+    DispClientContext* disp = (DispClientContext*) args->pInterface;
     guac_disp->disp = disp;
 
     guac_client_log(client, GUAC_LOG_DEBUG, "Display update channel "
@@ -109,19 +110,19 @@ static void guac_rdp_disp_channel_connected(rdpContext* context,
  * @param context
  *     The rdpContext associated with the active RDP session.
  *
- * @param e
+ * @param args
  *     Event-specific arguments, mainly the name of the channel, and a
  *     reference to the associated plugin loaded for that channel by FreeRDP.
  */
 static void guac_rdp_disp_channel_disconnected(rdpContext* context,
-        ChannelDisconnectedEventArgs* e) {
+        ChannelDisconnectedEventArgs* args) {
 
     guac_client* client = ((rdp_freerdp_context*) context)->client;
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
     guac_rdp_disp* guac_disp = rdp_client->disp;
 
     /* Ignore disconnection event if it's not for the Display Update channel */
-    if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) != 0)
+    if (strcmp(args->name, DISP_DVC_CHANNEL_NAME) != 0)
         return;
 
     /* Channel is no longer connected */
@@ -277,6 +278,18 @@ void guac_rdp_disp_update_size(guac_rdp_disp* disp,
 }
 
 int guac_rdp_disp_reconnect_needed(guac_rdp_disp* disp) {
+    guac_rdp_client* rdp_client = (guac_rdp_client*) disp->client->data;
+
+    /* Do not reconnect if files are open. */
+    if (rdp_client->filesystem != NULL
+            && rdp_client->filesystem->open_files > 0)
+        return 0;
+
+    /* Do not reconnect if an active print job is present */
+    if (rdp_client->active_job != NULL)
+        return 0;
+    
+    
     return disp->reconnect_needed;
 }
 

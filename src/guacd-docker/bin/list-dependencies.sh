@@ -21,7 +21,7 @@
 ##
 ## @fn list-dependencies.sh
 ##
-## Lists the Debian/Ubuntu package names for all library dependencies of the
+## Lists the Alpine Linux package names for all library dependencies of the
 ## given binaries. Each package is only listed once, even if multiple binaries
 ## provided by the same package are given.
 ##
@@ -35,14 +35,17 @@ while [ -n "$1" ]; do
     ldd "$1" | grep -v 'libguac' | awk '/=>/{print $(NF-1)}' \
         | while read LIBRARY; do
 
-        # Determine the Debian package which is associated with that
-        # library, if any
-        dpkg-query -S "$LIBRARY" 2> /dev/null || true
+        # List the package providing that library, if any
+        apk info -W "$LIBRARY" 2> /dev/null \
+            | grep 'is owned by' | grep -o '[^ ]*$' || true
 
     done
 
     # Next binary
     shift
 
-done | cut -f1 -d: | sort -u
+# Strip the "-VERSION" suffix from each package name, listing each resulting
+# package uniquely ("apk add" cannot handle package names that include the
+# version number)
+done | sed 's/\(.*\)-[0-9]\+\..*$/\1/' | sort -u
 

@@ -53,8 +53,9 @@ int guac_kubernetes_argv_callback(guac_user* user, const char* mimetype,
     }
 
     /* Update Kubernetes terminal size */
-    guac_kubernetes_resize(client, terminal->term_height,
-            terminal->term_width);
+    guac_kubernetes_resize(client,
+            guac_terminal_get_rows(terminal),
+            guac_terminal_get_columns(terminal));
 
     return 0;
 
@@ -62,25 +63,33 @@ int guac_kubernetes_argv_callback(guac_user* user, const char* mimetype,
 
 void* guac_kubernetes_send_current_argv(guac_user* user, void* data) {
 
-    guac_kubernetes_client* kubernetes_client = (guac_kubernetes_client*) data;
+    /* Defer to the batch handler, using the user socket */
+    return guac_kubernetes_send_current_argv_batch(user->client, user->socket);
+
+}
+
+void* guac_kubernetes_send_current_argv_batch(
+        guac_client* client, guac_socket* socket) {
+
+    guac_kubernetes_client* kubernetes_client = (guac_kubernetes_client*) client->data;
     guac_terminal* terminal = kubernetes_client->term;
 
     /* Send current color scheme */
-    guac_user_stream_argv(user, user->socket, "text/plain",
-            GUAC_KUBERNETES_ARGV_COLOR_SCHEME, terminal->color_scheme);
+    guac_client_stream_argv(client, socket, "text/plain",
+            GUAC_KUBERNETES_ARGV_COLOR_SCHEME,
+            guac_terminal_get_color_scheme(terminal));
 
     /* Send current font name */
-    guac_user_stream_argv(user, user->socket, "text/plain",
-            GUAC_KUBERNETES_ARGV_FONT_NAME, terminal->font_name);
+    guac_client_stream_argv(client, socket, "text/plain",
+            GUAC_KUBERNETES_ARGV_FONT_NAME,
+            guac_terminal_get_font_name(terminal));
 
     /* Send current font size */
     char font_size[64];
-    sprintf(font_size, "%i", terminal->font_size);
-    guac_user_stream_argv(user, user->socket, "text/plain",
+    sprintf(font_size, "%i", guac_terminal_get_font_size(terminal));
+    guac_client_stream_argv(client, socket, "text/plain",
             GUAC_KUBERNETES_ARGV_FONT_SIZE, font_size);
 
     return NULL;
 
-
 }
-

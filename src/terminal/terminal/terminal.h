@@ -21,21 +21,49 @@
 #ifndef _GUAC_TERMINAL_H
 #define _GUAC_TERMINAL_H
 
-#include "config.h"
-
-#include "buffer.h"
-#include "common/clipboard.h"
-#include "common/cursor.h"
-#include "display.h"
-#include "scrollbar.h"
-#include "types.h"
-#include "typescript.h"
+/**
+ * Constants, structures, and function definitions defining the core
+ * functionality for the terminal library.
+ *
+ * @file terminal.h
+ */
 
 #include <pthread.h>
 #include <stdbool.h>
 
 #include <guacamole/client.h>
 #include <guacamole/stream.h>
+
+/**
+ * The name of the font to use for the terminal if no name is specified.
+ */
+#define GUAC_TERMINAL_DEFAULT_FONT_NAME "monospace"
+
+/**
+ * The size of the font to use for the terminal if no font size is specified,
+ * in points.
+ */
+#define GUAC_TERMINAL_DEFAULT_FONT_SIZE 12
+
+/**
+ * The default maximum scrollback size in rows.
+ */
+#define GUAC_TERMINAL_DEFAULT_MAX_SCROLLBACK 1000
+
+/**
+ * The default ASCII code to use for the backspace key.
+ */
+#define GUAC_TERMINAL_DEFAULT_BACKSPACE 127
+
+/**
+ * The default (unset) color scheme.
+ */
+#define GUAC_TERMINAL_DEFAULT_COLOR_SCHEME ""
+
+/**
+ * The default value for the "disable copy" flag; by default copying is enabled.
+ */
+#define GUAC_TERMINAL_DEFAULT_DISABLE_COPY false
 
 /**
  * The absolute maximum number of rows to allow within the display.
@@ -84,6 +112,10 @@
  */
 #define GUAC_TERMINAL_PIPE_AUTOFLUSH 2
 
+/**
+ * Represents a terminal emulator which uses a given Guacamole client to
+ * render itself.
+ */
 typedef struct guac_terminal guac_terminal;
 
 /**
@@ -109,187 +141,81 @@ typedef enum guac_terminal_cursor_type {
 } guac_terminal_cursor_type;
 
 /**
- * Handler for characters printed to the terminal. When a character is printed,
- * the current char handler for the terminal is called and given that
- * character.
- */
-typedef int guac_terminal_char_handler(guac_terminal* term, unsigned char c);
-
-/**
- * Handler for setting the destination path for file uploads.
+ * Handler that is invoked whenever the necessary terminal codes are sent to
+ * to the given terminal to change the path for future file uploads.
+ *
+ * @param client
+ *     The guac_client associated with the terminal receiving the upload path
+ *     change terminal code.
+ *
+ * @param path
+ *     The requested path.
  */
 typedef void guac_terminal_upload_path_handler(guac_client* client, char* path);
 
 /**
- * Handler for creating an outbound file download stream for a specified file.
+ * Handler that is invoked whenever the necessary terminal codes are sent to
+ * initiate a download of a given remote file.
+ *
+ * @param client
+ *     The guac_client associated with the terminal receiving the file download
+ *     terminal code.
+ *
+ * @param filename
+ *     The name of the requested file. This may be a relative or absolute path,
+ *     and it is up to the implementation to define how this value is
+ *     interpreted.
+ *
+ * @return
+ *     The file stream created for the file download, already configured to
+ *     properly handle "ack" responses, etc. from the client, or NULL if the
+ *     stream could not be created.
  */
 typedef guac_stream* guac_terminal_file_download_handler(guac_client* client, char* filename);
 
 /**
- * Represents a terminal emulator which uses a given Guacamole client to
- * render itself.
+ * Configuration options that may be passed when creating a new guac_terminal.
+ *
+ * Note that guac_terminal_options should not be instantiated directly -
+ * to create a new options struct, use guac_terminal_options_create.
  */
-struct guac_terminal {
+typedef struct guac_terminal_options {
 
     /**
-     * The Guacamole client associated with this terminal emulator.
+     * Whether copying from the terminal clipboard should be blocked. If set,
+     * the contents of the terminal can still be copied, but will be usable
+     * only within the terminal itself. The clipboard contents will not be
+     * automatically streamed to the client.
      */
-    guac_client* client;
+    bool disable_copy;
 
     /**
-     * Whether user input should be handled and this terminal should render
-     * frames. Initially, this will be false, user input will be ignored, and
-     * rendering of frames will be withheld until guac_terminal_start() has
-     * been invoked. The data within frames will still be rendered, and text
-     * data received will still be handled, however actual frame boundaries
-     * will not be sent.
-     */
-    bool started;
-
-    /**
-     * The terminal render thread.
-     */
-    pthread_t thread;
-
-    /**
-     * Called whenever the necessary terminal codes are sent to change
-     * the path for future file uploads.
-     */
-    guac_terminal_upload_path_handler* upload_path_handler;
-
-    /**
-     * Called whenever the necessary terminal codes are sent to initiate
-     * a download of a given remote file.
-     */
-    guac_terminal_file_download_handler* file_download_handler;
-
-    /**
-     * Lock which restricts simultaneous access to this terminal via the root
-     * guac_terminal_* functions.
-     */
-    pthread_mutex_t lock;
-
-    /**
-     * The mutex associated with the modified condition and flag, locked
-     * whenever a thread is waiting on the modified condition, the modified
-     * condition is being signalled, or the modified flag is being changed.
-     */
-    pthread_mutex_t modified_lock;
-
-    /**
-     * Flag set whenever an operation has affected the terminal in a way that
-     * will require a frame flush. When this flag is set, the modified_cond
-     * condition will be signalled. The modified_lock will always be
-     * acquired before this flag is altered.
-     */
-    int modified;
-
-    /**
-     * Condition which is signalled when the modified flag has been set
-     */
-    pthread_cond_t modified_cond;
-
-    /**
-     * Pipe which will be the source of user input. When a terminal code
-     * generates synthesized user input, that data will be written to
-     * this pipe.
-     */
-    int stdin_pipe_fd[2];
-
-    /**
-     * The currently-open pipe stream from which all terminal input should be
-     * read, if any. If no pipe stream is open, terminal input will be received
-     * through keyboard, clipboard, and mouse events, and this value will be
-     * NULL.
-     */
-    guac_stream* input_stream;
-
-    /**
-     * The currently-open pipe stream to which all terminal output should be
-     * written, if any. If no pipe stream is open, terminal output will be
-     * written to the terminal display, and this value will be NULL.
-     */
-    guac_stream* pipe_stream;
-
-    /**
-     * Bitwise OR of all flags which apply to the currently-open pipe stream.
-     * If no pipe stream is open, this value has no meaning, and its contents
-     * are undefined.
-     *
-     * @see GUAC_TERMINAL_PIPE_INTERPRET_OUTPUT
-     * @see GUAC_TERMINAL_PIPE_AUTOFLUSH
-     */
-    int pipe_stream_flags;
-
-    /**
-     * Buffer of data pending write to the pipe_stream. Data within this buffer
-     * will be flushed to the pipe_stream when either (1) the buffer is full
-     * and another character needs to be written or (2) the pipe_stream is
-     * closed.
-     */
-    char pipe_buffer[6048];
-
-    /**
-     * The number of bytes currently stored within the pipe_buffer.
-     */
-    int pipe_buffer_length;
-
-    /**
-     * The currently-active typescript recording all terminal output, or NULL
-     * if no typescript is being used for the terminal session.
-     */
-    guac_terminal_typescript* typescript;
-
-    /**
-     * Terminal-wide mouse cursor, synchronized across all users.
-     */
-    guac_common_cursor* cursor;
-
-    /**
-     * Graphical representation of the current scroll state.
-     */
-    guac_terminal_scrollbar* scrollbar;
-
-    /**
-     * The relative offset of the display. A positive value indicates that
-     * many rows have been scrolled into view, zero indicates that no
-     * scrolling has occurred. Negative values are illegal.
-     */
-    int scroll_offset;
-
-    /**
-     * The maximum number of rows to allow within the terminal buffer. Note
-     * that while this value is traditionally referred to as the scrollback
-     * size, it actually encompasses both the display and the off-screen
-     * region. The terminal will ensure enough buffer space is allocated for
-     * the on-screen rows, even if this exceeds the defined maximum, however
-     * additional rows for off-screen data will only be available if the
-     * display is smaller than this value.
+     * The maximum number of rows to allow within the scrollback buffer. The
+     * user may still alter the size of the scrollback buffer using terminal
+     * codes, however the size can never exceed the maximum size given here.
+     * Note that this space is shared with the display, with the scrollable
+     * area actually only containing the given number of rows less the number
+     * of rows currently displayed, and sufficient buffer space will always be
+     * allocated to represent the display area of the terminal regardless of
+     * the value given here.
      */
     int max_scrollback;
 
     /**
-     * The number of rows that the user has requested be avalable within the
-     * terminal buffer. This value may be adjusted by the user while the
-     * terminal is running through console codes, and will adjust the number
-     * of rows available within the terminal buffer, subject to the maximum
-     * defined at terminal creation and stored within max_scrollback.
+     * The name of the font to use when rendering glyphs.
      */
-    int requested_scrollback;
+    char* font_name;
 
     /**
-     * The width of the space available to all components of the terminal, in
-     * pixels. This may include space which will not actually be used for
-     * character rendering.
+     * The size of each glyph, in points.
      */
-    int outer_width;
+    int font_size;
 
     /**
-     * The height of the space available to all components of the terminal, in
-     * pixels. This may include space which will not actually be used for
-     * character rendering.
+     * The DPI of the display. The given font size will be adjusted to produce
+     * glyphs at the given DPI.
      */
-    int outer_height;
+    int dpi;
 
     /**
      * The width of the terminal, in pixels.
@@ -302,250 +228,18 @@ struct guac_terminal {
     int height;
 
     /**
-     * The width of the terminal, in characters.
+     * The name of the color scheme to use. This string must be in the format
+     * accepted by guac_terminal_parse_color_scheme().
      */
-    int term_width;
+    char* color_scheme;
 
     /**
-     * The height of the terminal, in characters.
+     * The integer ASCII code to send when backspace is pressed in
+     * the terminal.
      */
-    int term_height;
+    int backspace;
 
-    /**
-     * The index of the first row in the scrolling region.
-     */
-    int scroll_start;
-
-    /**
-     * The index of the last row in the scrolling region.
-     */
-    int scroll_end;
-
-    /**
-     * The current row location of the cursor. Note that while most terminal
-     * operations will clip the cursor location within the bounds of the
-     * terminal, this is not guaranteed.
-     */
-    int cursor_row;
-
-    /**
-     * The current column location of the cursor. Note that while most
-     * terminal operations will clip the cursor location within the bounds
-     * of the terminal, this is not guaranteed. There are times when the
-     * cursor is legitimately outside the terminal bounds (such as when the
-     * end of a line is reached, but it is not yet necessary to scroll up).
-     */
-    int cursor_col;
-
-    /**
-     * The desired visibility state of the cursor.
-     */
-    bool cursor_visible;
-
-    /**
-     * The row of the rendered cursor.
-     * Will be set to -1 if the cursor is not visible.
-     */
-    int visible_cursor_row;
-
-    /**
-     * The column of the rendered cursor.
-     * Will be set to -1 if the cursor is not visible.
-     */
-    int visible_cursor_col;
-
-    /**
-     * The row of the saved cursor (ESC 7).
-     */
-    int saved_cursor_row;
-
-    /**
-     * The column of the saved cursor (ESC 7).
-     */
-    int saved_cursor_col;
-
-    /**
-     * The attributes which will be applied to future characters.
-     */
-    guac_terminal_attributes current_attributes;
-
-    /**
-     * The character whose attributes dictate the default attributes
-     * of all characters. When new screen space is allocated, this
-     * character fills the gaps.
-     */
-    guac_terminal_char default_char;
-
-    /**
-     * Handler which will receive all printed characters, updating the terminal
-     * accordingly.
-     */
-    guac_terminal_char_handler* char_handler;
-
-    /**
-     * The difference between the currently-rendered screen and the current
-     * state of the terminal, and the contextual information necessary to
-     * interpret and render those differences.
-     */
-    guac_terminal_display* display;
-
-    /**
-     * Current terminal display state. All characters present on the screen
-     * are within this buffer. This has nothing to do with the display, which
-     * facilitates transfer of a set of changes to the remote display.
-     */
-    guac_terminal_buffer* buffer;
-
-    /**
-     * Automatically place a tabstop every N characters. If zero, then no
-     * tabstops exist automatically.
-     */
-    int tab_interval;
-
-    /**
-     * Array of all tabs set. Each entry is the column number of a tab + 1,
-     * or 0 if that tab cell is unset.
-     */
-    int custom_tabs[GUAC_TERMINAL_MAX_TABS];
-
-    /**
-     * Array of arrays of mapped characters, where the character N is located at the N-32
-     * position within the array. Each element in a contained array is the corresponding Unicode
-     * codepoint. If NULL, a direct mapping from Unicode is used. The entries of the main array
-     * correspond to the character set in use (G0, G1, etc.)
-     */
-    const int* char_mapping[2];
-
-    /**
-     * The active character set. For example, 0 for G0, 1 for G1, etc.
-     */
-    int active_char_set;
-
-    /**
-     * Whether text is currently selected.
-     */
-    bool text_selected;
-
-    /**
-     * Whether the selection is finished, and will no longer be modified. A
-     * committed selection remains highlighted for reference, but the
-     * highlight will be removed if characters within the selected region are
-     * modified.
-     */
-    bool selection_committed;
-
-    /**
-     * The row that the selection starts at.
-     */
-    int selection_start_row;
-
-    /**
-     * The column that the selection starts at.
-     */
-    int selection_start_column;
-
-    /**
-     * The width of the character at selection start.
-     */
-    int selection_start_width;
-
-    /**
-     * The row that the selection ends at.
-     */
-    int selection_end_row;
-
-    /**
-     * The column that the selection ends at.
-     */
-    int selection_end_column;
-
-    /**
-     * The width of the character at selection end.
-     */
-    int selection_end_width;
-
-    /**
-     * Whether the cursor (arrow) keys should send cursor sequences
-     * or application sequences (DECCKM).
-     */
-    bool application_cursor_keys;
-
-    /**
-     * Whether a CR should automatically follow a LF, VT, or FF.
-     */
-    bool automatic_carriage_return;
-
-    /**
-     * Whether insert mode is enabled (DECIM).
-     */
-    bool insert_mode;
-
-    /**
-     * Whether the alt key is currently being held down.
-     */
-    int mod_alt;
-
-    /**
-     * Whether the control key is currently being held down.
-     */
-    int mod_ctrl;
-
-    /**
-     * Whether the shift key is currently being held down.
-     */
-    int mod_shift;
-
-    /**
-     * The current mouse button state.
-     */
-    int mouse_mask;
-
-    /**
-     * The current mouse cursor, to avoid re-setting the cursor image.
-     */
-    guac_terminal_cursor_type current_cursor;
-
-    /**
-     * The current contents of the clipboard. This clipboard instance is
-     * maintained externally (will not be freed when this terminal is freed)
-     * and will be updated both internally by the terminal and externally
-     * through received clipboard instructions.
-     */
-    guac_common_clipboard* clipboard;
-
-    /**
-     * The name of the font to use when rendering glyphs, as requested at
-     * creation time or via guac_terminal_apply_font().
-     */
-    const char* font_name;
-
-    /**
-     * The size of each glyph, in points, as requested at creation time or via
-     * guac_terminal_apply_font().
-     */
-    int font_size;
-
-    /**
-     * The name of the color scheme to use, as requested at creation time or
-     * via guac_terminal_apply_color_scheme(). This string must be in the
-     * format accepted by guac_terminal_parse_color_scheme().
-     */
-    const char* color_scheme;
-
-    /**
-     * ASCII character to send when backspace is pressed.
-     */
-    char backspace;
-
-    /**
-     * Whether copying from the terminal clipboard should be blocked. If set,
-     * the contents of the terminal can still be copied, but will be usable
-     * only within the terminal itself. The clipboard contents will not be
-     * automatically streamed to the client.
-     */
-    bool disable_copy;
-
-};
+} guac_terminal_options;
 
 /**
  * Creates a new guac_terminal, having the given width and height, and
@@ -558,40 +252,26 @@ struct guac_terminal {
  * terminal output or user input is required.
  *
  * @param client
- *     The client to which the terminal will be rendered.
+ *      The client to which the terminal will be rendered.
  *
- * @param clipboard
- *     The guac_common_clipboard which will contain the current clipboard
- *     state. It is expected that this clipboard instance will be updated
- *     both internally by the terminal and externally through received
- *     clipboard instructions. This clipboard will not be automatically
- *     freed when this terminal is freed.
+ * @param terminal_options
+ *     The configuration used for instantiating the terminal. For information
+ *     about the options, see the guac_terminal_options definition.
  *
- * @param disable_copy
- *     Whether copying from the terminal clipboard should be blocked. If set,
- *     the contents of the terminal can still be copied, but will be usable
- *     only within the terminal itself. The clipboard contents will not be
- *     automatically streamed to the client.
+ * @return
+ *     A new guac_terminal having the given font, dimensions, and attributes
+ *     which renders all text to the given client.
+ */
+guac_terminal* guac_terminal_create(guac_client* client,
+        guac_terminal_options* terminal_options);
+
+/**
+ * Create a new guac_terminal_options struct. All parameters are required.
+ * Any options that are not passed in this constructor will be set to
+ * default values unless overriden.
  *
- * @param max_scrollback
- *     The maximum number of rows to allow within the scrollback buffer. The
- *     user may still alter the size of the scrollback buffer using terminal
- *     codes, however the size can never exceed the maximum size given here.
- *     Note that this space is shared with the display, with the scrollable
- *     area actually only containing the given number of rows less the number
- *     of rows currently displayed, and sufficient buffer space will always be
- *     allocated to represent the display area of the terminal regardless of
- *     the value given here.
- *
- * @param font_name
- *     The name of the font to use when rendering glyphs.
- *
- * @param font_size
- *     The size of each glyph, in points.
- *
- * @param dpi
- *     The DPI of the display. The given font size will be adjusted to produce
- *     glyphs at the given DPI.
+ * The guac_terminal_options struct should only be created using this
+ * constructor.
  *
  * @param width
  *     The width of the terminal, in pixels.
@@ -599,32 +279,65 @@ struct guac_terminal {
  * @param height
  *     The height of the terminal, in pixels.
  *
- * @param color_scheme
- *     The name of the color scheme to use. This string must be in the format
- *     accepted by guac_terminal_parse_color_scheme().
- *
- * @param backspace
- *     The integer ASCII code to send when backspace is pressed in
- *     this terminal.
+ * @param dpi
+ *     The DPI of the display. The given font size will be adjusted to produce
+ *     glyphs at the given DPI.
  *
  * @return
- *     A new guac_terminal having the given font, dimensions, and attributes
- *     which renders all text to the given client.
+ *     A new terminal options struct with all required options populated,
+ *     ready to have any defaults overriden as needed.
  */
-guac_terminal* guac_terminal_create(guac_client* client,
-        guac_common_clipboard* clipboard, bool disable_copy,
-        int max_scrollback, const char* font_name, int font_size, int dpi,
-        int width, int height, const char* color_scheme,
-        const int backspace);
+guac_terminal_options* guac_terminal_options_create(
+        int width, int height, int dpi);
 
 /**
  * Frees all resources associated with the given terminal.
+ *
+ * @param term
+ *     The terminal to free.
  */
 void guac_terminal_free(guac_terminal* term);
 
 /**
+ * Sets the upload path handler for the given terminal. The upload path handler
+ * is invoked whenever the terminal codes requesting an upload path change are
+ * sent.
+ *
+ * @param terminal
+ *     The terminal to set the upload path handler for.
+ *
+ * @param upload_path_handler
+ *      The handler to be called whenever the necessary terminal codes are sent
+ *      to the given terminal to change the path for future file uploads.
+ */
+void guac_terminal_set_upload_path_handler(guac_terminal* terminal,
+        guac_terminal_upload_path_handler* upload_path_handler);
+
+/**
+ * Sets the file download handler for the given terminal. The file download
+ * handler is invoked whenever the terminal codes requesting download of a
+ * given remote file are sent.
+ *
+ * @param terminal
+ *     The terminal to set the file download handler for.
+ *
+ * @param file_download_handler
+ *      The handler to be called whenever the necessary terminal codes are sent to
+ *      the given terminal to initiate a download of a given remote file.
+ */
+void guac_terminal_set_file_download_handler(guac_terminal* terminal,
+        guac_terminal_file_download_handler* file_download_handler);
+
+/**
  * Renders a single frame of terminal data. If data is not yet available,
  * this function will block until data is written.
+ *
+ * @param terminal
+ *     The terminal that should be rendered.
+ *
+ * @return
+ *     Zero if the frame was rendered successfully, non-zero if an error
+ *     occurred.
  */
 int guac_terminal_render_frame(guac_terminal* terminal);
 
@@ -633,6 +346,19 @@ int guac_terminal_render_frame(guac_terminal* terminal);
  * supplied by calls to guac_terminal_send_key(),
  * guac_terminal_send_mouse(), and guac_terminal_send_stream(). If input is not
  * yet available, this function will block.
+ *
+ * @param terminal
+ *     The terminal to read from.
+ *
+ * @param c
+ *     The buffer that should receive the bytes read.
+ *
+ * @param size
+ *     The number of bytes available within the buffer.
+ *
+ * @return
+ *     The number of bytes read into the buffer, zero if end-of-file is reached
+ *     (STDIN has been closed), or a negative value if an error occurs.
  */
 int guac_terminal_read_stdin(guac_terminal* terminal, char* c, int size);
 
@@ -694,8 +420,23 @@ char* guac_terminal_prompt(guac_terminal* terminal, const char* title,
 
 /**
  * Writes the given format string and arguments to this terminal's STDOUT in
- * the same manner as printf(). This function may block until space is
+ * the same manner as printf(). The entire populated format string will always
+ * be written unless an error occurs. This function may block until space is
  * freed in the output buffer by guac_terminal_render_frame().
+ *
+ * @param terminal
+ *     The terminal to write to.
+ *
+ * @param format
+ *     A printf-style format string describing the data to be written to
+ *     STDOUT.
+ *
+ * @param ...
+ *     Any arguments to use when filling the format string.
+ *
+ * @return
+ *     The number of bytes written to STDOUT, or a negative value if an error
+ *     occurs preventing the data from being written in its entirety.
  */
 int guac_terminal_printf(guac_terminal* terminal, const char* format, ...);
 
@@ -762,6 +503,67 @@ int guac_terminal_send_mouse(guac_terminal* term, guac_user* user,
         int x, int y, int mask);
 
 /**
+ * Sends the given string as if typed by the user. If terminal input is
+ * currently coming from a stream due to a prior call to
+ * guac_terminal_send_stream(), any input which would normally result from
+ * invoking this function is dropped.
+ *
+ * @param term
+ *     The terminal which should receive the given data on STDIN.
+ *
+ * @param data
+ *     The data the terminal should receive on STDIN.
+ *
+ * @param length
+ *     The size of the given data, in bytes.
+ *
+ * @return
+ *     The number of bytes written to STDIN, or a negative value if an error
+ *     occurs preventing the data from being written. This should always be
+ *     the size of the data given unless data is intentionally dropped.
+ */
+int guac_terminal_send_data(guac_terminal* term, const char* data, int length);
+
+/**
+ * Sends the given string as if typed by the user. If terminal input is
+ * currently coming from a stream due to a prior call to
+ * guac_terminal_send_stream(), any input which would normally result from
+ * invoking this function is dropped.
+ *
+ * @param term
+ *     The terminal which should receive the given data on STDIN.
+ *
+ * @param data
+ *     The data the terminal should receive on STDIN.
+ *
+ * @return
+ *     The number of bytes written to STDIN, or a negative value if an error
+ *     occurs preventing the data from being written. This should always be
+ *     the size of the data given unless data is intentionally dropped.
+ */
+int guac_terminal_send_string(guac_terminal* term, const char* data);
+
+/**
+ * Writes the given buffer to the given terminal's STDOUT. All requested bytes
+ * will be written unless an error occurs. This function may block until space
+ * is freed in the output buffer by guac_terminal_render_frame().
+ *
+ * @param term
+ *     The terminal to write to.
+ *
+ * @param buffer
+ *     A buffer containing the characters to be written to the terminal.
+ *
+ * @param length
+ *     The number of bytes within the given string to write to the terminal.
+ *
+ * @return
+ *     The number of bytes written to STDOUT, or a negative value if an error
+ *     occurs preventing the data from being written in its entirety.
+ */
+int guac_terminal_write(guac_terminal* term, const char* buffer, int length);
+
+/**
  * Initializes the handlers of the given guac_stream such that it serves as the
  * source of input to the terminal. Other input sources will be temporarily
  * ignored until the stream is closed through receiving an "end" instruction.
@@ -790,22 +592,35 @@ int guac_terminal_send_stream(guac_terminal* term, guac_user* user,
         guac_stream* stream);
 
 /**
- * Handles a scroll event received from the scrollbar associated with a
- * terminal.
+ * Sends data through STDIN as if typed by the user, using the format string
+ * given and any args (similar to printf). If terminal input is currently
+ * coming from a stream due to a prior call to guac_terminal_send_stream(), any
+ * input which would normally result from invoking this function is dropped.
  *
- * @param scrollbar
- *     The scrollbar that has been scrolled.
+ * @param term
+ *     The terminal which should receive the given data on STDIN.
  *
- * @param value
- *     The new value that should be stored within the scrollbar, and
- *     represented within the terminal display.
+ * @param format
+ *     A printf-style format string describing the data to be received on
+ *     STDIN.
+ *
+ * @param ...
+ *     Any arguments to use when filling the format string.
+ *
+ * @return
+ *     The number of bytes written to STDIN, or a negative value if an error
+ *     occurs preventing the data from being written. This should always be
+ *     the size of the data given unless data is intentionally dropped.
  */
-void guac_terminal_scroll_handler(guac_terminal_scrollbar* scrollbar, int value);
+int guac_terminal_sendf(guac_terminal* term, const char* format, ...);
 
 /**
  * Replicates the current display state to a user that has just joined the
  * connection. All instructions necessary to replicate state are sent over the
  * given socket.
+ *
+ * @deprecated The guac_terminal_sync_users method should be used when
+ * duplicating display state to a set of users.
  *
  * @param term
  *     The terminal emulator associated with the connection being joined.
@@ -820,261 +635,117 @@ void guac_terminal_scroll_handler(guac_terminal_scrollbar* scrollbar, int value)
 void guac_terminal_dup(guac_terminal* term, guac_user* user,
         guac_socket* socket);
 
-/* INTERNAL FUNCTIONS */
-
-
 /**
- * Acquires exclusive access to the terminal. Note that enforcing this
- * exclusive access requires that ALL users of the terminal call this
- * function before making further calls to the terminal.
+ * Replicates the current display state to one or more users that are joining
+ * the connection. All instructions necessary to replicate state are sent over
+ * the given socket. The set of users receiving these instructions is
+ * determined solely by the socket chosen.
+ *
+ * @param term
+ *     The terminal whose state should be synchronized to the users.
+ *
+ * @param client
+ *     The client associated with the users to be synchronized.
+ *
+ * @param socket
+ *     The socket to which the terminal state will be broadcast.
  */
-void guac_terminal_lock(guac_terminal* terminal);
+void guac_terminal_sync_users(
+        guac_terminal* term, guac_client* client, guac_socket* socket);
 
 /**
- * Releases exclusive access to the terminal.
- */
-void guac_terminal_unlock(guac_terminal* terminal);
-
-/**
- * Resets the state of the given terminal, as if it were just allocated.
- */
-void guac_terminal_reset(guac_terminal* term);
-
-/**
- * Writes the given string of characters to the terminal.
- */
-int guac_terminal_write(guac_terminal* term, const char* c, int size);
-
-/**
- * Sets the character at the given row and column to the specified value.
- */
-int guac_terminal_set(guac_terminal* term, int row, int col, int codepoint);
-
-/**
- * Clears the given region within a single row.
- */
-int guac_terminal_clear_columns(guac_terminal* term,
-        int row, int start_col, int end_col);
-
-/**
- * Clears the given region from right-to-left, top-to-bottom, replacing
- * all characters with the current background color and attributes.
- */
-int guac_terminal_clear_range(guac_terminal* term,
-        int start_row, int start_col,
-        int end_row, int end_col);
-
-/**
- * Scrolls the terminal's current scroll region up by one row.
- */
-int guac_terminal_scroll_up(guac_terminal* term,
-        int start_row, int end_row, int amount);
-
-/**
- * Scrolls the terminal's current scroll region down by one row.
- */
-int guac_terminal_scroll_down(guac_terminal* term,
-        int start_row, int end_row, int amount);
-
-/**
- * Commits the current cursor location, updating the visible cursor
- * on the screen.
- */
-void guac_terminal_commit_cursor(guac_terminal* term);
-
-/**
- * Scroll down the display by the given amount, replacing the new space with
- * data from the buffer. If not enough data is available, the maximum
- * amount will be scrolled.
- */
-void guac_terminal_scroll_display_down(guac_terminal* terminal, int amount);
-
-/**
- * Scroll up the display by the given amount, replacing the new space with data
- * from either the buffer or the terminal buffer.  If not enough data is
- * available, the maximum amount will be scrolled.
- */
-void guac_terminal_scroll_display_up(guac_terminal* terminal, int amount);
-
-/* LOW-LEVEL TERMINAL OPERATIONS */
-
-
-/**
- * Copies the given range of columns to a new location, offset from
- * the original by the given number of columns.
- */
-void guac_terminal_copy_columns(guac_terminal* terminal, int row,
-        int start_column, int end_column, int offset);
-
-/**
- * Copies the given range of rows to a new location, offset from the
- * original by the given number of rows.
- */
-void guac_terminal_copy_rows(guac_terminal* terminal,
-        int start_row, int end_row, int offset);
-
-/**
- * Sets the given range of columns within the given row to the given
- * character.
- */
-void guac_terminal_set_columns(guac_terminal* terminal, int row,
-        int start_column, int end_column, guac_terminal_char* character);
-
-/**
- * Resize the terminal to the given dimensions.
+ * Resize the client display and terminal to the given pixel dimensions.
+ *
+ * @param term
+ *     The terminal to resize.
+ *
+ * @param width
+ *     The new terminal width, in pixels.
+ *
+ * @param height
+ *     The new terminal height, in pixels.
+ *
+ * @return
+ *     Zero if the terminal was successfully resized to the given dimensions,
+ *     non-zero otherwise.
  */
 int guac_terminal_resize(guac_terminal* term, int width, int height);
 
 /**
- * Flushes all pending operations within the given guac_terminal.
- */
-void guac_terminal_flush(guac_terminal* terminal);
-
-/**
- * Sends the given string as if typed by the user. If terminal input is
- * currently coming from a stream due to a prior call to
- * guac_terminal_send_stream(), any input which would normally result from
- * invoking this function is dropped.
+ * Returns the number of rows within the buffer of the given terminal which are
+ * not currently displayed on screen. Adjustments to the desired scrollback
+ * size are taken into account, and rows which are within the buffer but
+ * unavailable due to being outside the desired scrollback range are ignored.
  *
  * @param term
- *     The terminal which should receive the given data on STDIN.
+ *     The terminal whose off-screen row count should be determined.
  *
+ * @return
+ *     The number of rows within the buffer which are not currently displayed
+ *     on screen.
+ */
+int guac_terminal_get_available_scroll(guac_terminal* term);
+
+/**
+ * Returns the height of the given terminal, in characters.
+ *
+ * @param term
+ *     The terminal whose height should be determined.
+ *
+ * @return
+ *     The height of the terminal, in characters.
+ */
+int guac_terminal_get_rows(guac_terminal* term);
+
+/**
+ * Returns the width of the given terminal, in characters.
+ *
+ * @param term
+ *     The terminal whose width should be determined.
+ *
+ * @return
+ *     The width of the terminal, in characters.
+ */
+int guac_terminal_get_columns(guac_terminal* term);
+
+/**
+ * Clears the clipboard contents for a given terminal, and assigns a new
+ * mimetype for future data.
+ *
+ * @param terminal
+ *      The terminal whose clipboard is being reset.
+ * @param mimetype
+ *      The mimetype of future data.
+ */
+void guac_terminal_clipboard_reset(guac_terminal* terminal,
+        const char* mimetype);
+
+/**
+ * Appends the given data to the contents of the clipboard for the given
+ * terminal. The data must match the mimetype chosen for the clipboard data by
+ * guac_terminal_clipboard_reset().
+ *
+ * @param terminal
+ *      The terminal whose clipboard is being appended to.
  * @param data
- *     The data the terminal should receive on STDIN.
- *
+ *      The data to append.
  * @param length
- *     The size of the given data, in bytes.
- *
- * @return
- *     The number of bytes written to STDIN, or a negative value if an error
- *     occurs preventing the data from being written. This should always be
- *     the size of the data given unless data is intentionally dropped.
+ *      The number of bytes to append from the data given.
  */
-int guac_terminal_send_data(guac_terminal* term, const char* data, int length);
+void guac_terminal_clipboard_append(guac_terminal* terminal,
+        const char* data, int length);
 
 /**
- * Sends the given string as if typed by the user. If terminal input is
- * currently coming from a stream due to a prior call to
- * guac_terminal_send_stream(), any input which would normally result from
- * invoking this function is dropped. 
+ * Removes the given user from any user-specific resources internal to the
+ * given terminal. This function must be called whenever a user leaves a
+ * terminal connection.
  *
- * @param term
- *     The terminal which should receive the given data on STDIN.
- *
- * @param data
- *     The data the terminal should receive on STDIN.
- *
- * @return
- *     The number of bytes written to STDIN, or a negative value if an error
- *     occurs preventing the data from being written. This should always be
- *     the size of the data given unless data is intentionally dropped.
+ * @param terminal
+ *      The terminal that the given user is leaving.
+ * @param user
+ *      The user who is disconnecting.
  */
-int guac_terminal_send_string(guac_terminal* term, const char* data);
-
-/**
- * Sends data through STDIN as if typed by the user, using the format string
- * given and any args (similar to printf). If terminal input is currently
- * coming from a stream due to a prior call to guac_terminal_send_stream(), any
- * input which would normally result from invoking this function is dropped.
- *
- * @param term
- *     The terminal which should receive the given data on STDIN.
- *
- * @param format
- *     A printf-style format string describing the data to be received on
- *     STDIN.
- *
- * @param ...
- *     Any srguments to use when filling the format string.
- *
- * @return
- *     The number of bytes written to STDIN, or a negative value if an error
- *     occurs preventing the data from being written. This should always be
- *     the size of the data given unless data is intentionally dropped.
- */
-int guac_terminal_sendf(guac_terminal* term, const char* format, ...);
-
-/**
- * Sets a tabstop in the given column.
- */
-void guac_terminal_set_tab(guac_terminal* term, int column);
-
-/**
- * Removes the tabstop at the given column.
- */
-void guac_terminal_unset_tab(guac_terminal* term, int column);
-
-/**
- * Removes all tabstops.
- */
-void guac_terminal_clear_tabs(guac_terminal* term);
-
-/**
- * Given a column within the given terminal, returns the location of the
- * next tabstop (or the rightmost character, if no more tabstops exist).
- */
-int guac_terminal_next_tab(guac_terminal* term, int column);
-
-/**
- * Opens a new pipe stream, redirecting all output from the given terminal to
- * that pipe stream. If a pipe stream is already open, that pipe stream will
- * be flushed and closed prior to opening the new pipe stream.
- *
- * @param term
- *     The terminal which should redirect output to a new pipe stream having
- *     the given name.
- *
- * @param name
- *     The name of the pipe stream to open.
- *
- * @param flags
- *     A bitwise OR of all integer flags which should apply to the new pipe
- *     stream.
- *
- *     @see GUAC_TERMINAL_PIPE_INTERPRET_OUTPUT
- *     @see GUAC_TERMINAL_PIPE_AUTOFLUSH
- */
-void guac_terminal_pipe_stream_open(guac_terminal* term, const char* name,
-        int flags);
-
-/**
- * Writes a single byte of data to the pipe stream currently open and
- * associated with the given terminal. The pipe stream must already have been
- * opened via guac_terminal_pipe_stream_open(). If no pipe stream is currently
- * open, this function has no effect. Data written through this function may
- * be buffered.
- *
- * @param term
- *     The terminal whose currently-open pipe stream should be written to.
- *
- * @param c
- *     The byte of data to write to the pipe stream.
- */
-void guac_terminal_pipe_stream_write(guac_terminal* term, char c);
-
-/**
- * Flushes any data currently buffered for the currently-open pipe stream
- * associated with the given terminal. The pipe stream must already have been
- * opened via guac_terminal_pipe_stream_open(). If no pipe stream is currently
- * open or no data is in the buffer, this function has no effect.
- *
- * @param term
- *     The terminal whose pipe stream buffer should be flushed.
- */
-void guac_terminal_pipe_stream_flush(guac_terminal* term);
-
-/**
- * Closes the currently-open pipe stream associated with the given terminal,
- * redirecting all output back to the terminal display.  Any data currently
- * buffered for output to the pipe stream will be flushed prior to closure. The
- * pipe stream must already have been opened via
- * guac_terminal_pipe_stream_open(). If no pipe stream is currently open, this
- * function has no effect.
- *
- * @param term
- *     The terminal whose currently-open pipe stream should be closed.
- */
-void guac_terminal_pipe_stream_close(guac_terminal* term);
+void guac_terminal_remove_user(guac_terminal* terminal, guac_user* user);
 
 /**
  * Requests that the terminal write all output to a new pair of typescript
@@ -1109,21 +780,6 @@ int guac_terminal_create_typescript(guac_terminal* term, const char* path,
         const char* name, int create_path);
 
 /**
- * Returns the number of rows within the buffer of the given terminal which are
- * not currently displayed on screen. Adjustments to the desired scrollback
- * size are taken into account, and rows which are within the buffer but
- * unavailable due to being outside the desired scrollback range are ignored.
- *
- * @param term
- *     The terminal whose off-screen row count should be determined.
- *
- * @return
- *     The number of rows within the buffer which are not currently displayed
- *     on screen.
- */
-int guac_terminal_available_scroll(guac_terminal* term);
-
-/**
  * Immediately applies the given color scheme to the given terminal, overriding
  * the color scheme provided when the terminal was created. Valid color schemes
  * are those accepted by guac_terminal_parse_color_scheme().
@@ -1136,6 +792,17 @@ int guac_terminal_available_scroll(guac_terminal* term);
  */
 void guac_terminal_apply_color_scheme(guac_terminal* terminal,
         const char* color_scheme);
+
+/**
+ * Returns name of the color scheme currently in use by the given terminal.
+ *
+ * @param terminal
+ *      The terminal whose color scheme should be returned.
+ *
+ * @return
+ *     The name of the color scheme currently in use by the given terminal.
+ */
+const char* guac_terminal_get_color_scheme(guac_terminal* terminal);
 
 /**
  * Alters the font of the terminal. The terminal will automatically be redrawn
@@ -1161,5 +828,37 @@ void guac_terminal_apply_color_scheme(guac_terminal* terminal,
 void guac_terminal_apply_font(guac_terminal* terminal, const char* font_name,
         int font_size, int dpi);
 
-#endif
+/**
+ * Returns the font name currently in use by the given terminal.
+ *
+ * @param terminal
+ *     The terminal whose font name is being retrieved.
+ *
+ * @return
+ *     The name of the font in use by the given terminal.
+ */
+const char* guac_terminal_get_font_name(guac_terminal* terminal);
 
+/**
+ * Returns the font size currently in use by the given terminal.
+ *
+ * @param terminal
+ *     The terminal whose font size is being retrieved.
+ *
+ * @return
+ *     The size of the font in use by the given terminal.
+ */
+int guac_terminal_get_font_size(guac_terminal* terminal);
+
+/**
+ * Returns the current state of the mod_ctrl flag in the given terminal.
+ *
+ * @param terminal
+ *     The terminal for which the mod_ctrl state is being checked.
+ *
+ * @return
+ *     The current state of the mod_ctrl flag.
+ */
+int guac_terminal_get_mod_ctrl(guac_terminal* terminal);
+
+#endif

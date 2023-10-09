@@ -21,8 +21,6 @@
 
 #include "argv.h"
 #include "client.h"
-#include "common/clipboard.h"
-#include "common/recording.h"
 #include "common-ssh/sftp.h"
 #include "ssh.h"
 #include "terminal/terminal.h"
@@ -35,6 +33,35 @@
 
 #include <guacamole/argv.h>
 #include <guacamole/client.h>
+#include <guacamole/recording.h>
+#include <guacamole/socket.h>
+
+
+/**
+ * A pending join handler implementation that will synchronize the connection
+ * state for all pending users prior to them being promoted to full user.
+ *
+ * @param client
+ *     The client whose pending users are about to be promoted.
+ *
+ * @return
+ *     Always zero.
+ */
+static int guac_ssh_join_pending_handler(guac_client* client) {
+
+    guac_ssh_client* ssh_client = (guac_ssh_client*) client->data;
+
+    /* Synchronize the terminal state to all pending users */
+    if (ssh_client->term != NULL) {
+        guac_socket* broadcast_socket = client->pending_socket;
+        guac_terminal_sync_users(ssh_client->term, client, broadcast_socket);
+        guac_ssh_send_current_argv_batch(client, broadcast_socket);
+        guac_socket_flush(broadcast_socket);
+    }
+
+    return 0;
+
+}
 
 int guac_client_init(guac_client* client) {
 
@@ -45,11 +72,9 @@ int guac_client_init(guac_client* client) {
     guac_ssh_client* ssh_client = calloc(1, sizeof(guac_ssh_client));
     client->data = ssh_client;
 
-    /* Init clipboard */
-    ssh_client->clipboard = guac_common_clipboard_alloc(GUAC_SSH_CLIPBOARD_MAX_LENGTH);
-
     /* Set handlers */
     client->join_handler = guac_ssh_user_join_handler;
+    client->join_pending_handler = guac_ssh_join_pending_handler;
     client->free_handler = guac_ssh_client_free_handler;
     client->leave_handler = guac_ssh_user_leave_handler;
 
@@ -103,7 +128,7 @@ int guac_ssh_client_free_handler(guac_client* client) {
 
     /* Clean up recording, if in progress */
     if (ssh_client->recording != NULL)
-        guac_common_recording_free(ssh_client->recording);
+        guac_recording_free(ssh_client->recording);
 
     /* Free interactive SSH session */
     if (ssh_client->session != NULL)
@@ -118,7 +143,6 @@ int guac_ssh_client_free_handler(guac_client* client) {
         guac_ssh_settings_free(ssh_client->settings);
 
     /* Free client structure */
-    guac_common_clipboard_free(ssh_client->clipboard);
     free(ssh_client);
 
     guac_common_ssh_uninit();

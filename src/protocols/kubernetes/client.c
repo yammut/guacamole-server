@@ -19,13 +19,13 @@
 
 #include "argv.h"
 #include "client.h"
-#include "common/clipboard.h"
 #include "kubernetes.h"
 #include "settings.h"
 #include "user.h"
 
 #include <guacamole/argv.h>
 #include <guacamole/client.h>
+#include <guacamole/socket.h>
 #include <libwebsockets.h>
 
 #include <langinfo.h>
@@ -78,6 +78,34 @@ static void guac_kubernetes_log(int level, const char* line) {
 
 }
 
+/**
+ * A pending join handler implementation that will synchronize the connection
+ * state for all pending users prior to them being promoted to full user.
+ *
+ * @param client
+ *     The client whose pending users are about to be promoted to full users,
+ *     and therefore need their connection state synchronized.
+ *
+ * @return
+ *     Always zero.
+ */
+static int guac_kubernetes_join_pending_handler(guac_client* client) {
+
+    guac_kubernetes_client* kubernetes_client =
+        (guac_kubernetes_client*) client->data;
+
+    /* Synchronize the terminal state to all pending users */
+    if (kubernetes_client->term != NULL) {
+        guac_socket* broadcast_socket = client->pending_socket;
+        guac_terminal_sync_users(kubernetes_client->term, client, broadcast_socket);
+        guac_kubernetes_send_current_argv_batch(client, broadcast_socket);
+        guac_socket_flush(broadcast_socket);
+    }
+
+    return 0;
+
+}
+
 int guac_client_init(guac_client* client) {
 
     /* Ensure reference to main guac_client remains available in all
@@ -95,11 +123,9 @@ int guac_client_init(guac_client* client) {
     guac_kubernetes_client* kubernetes_client = calloc(1, sizeof(guac_kubernetes_client));
     client->data = kubernetes_client;
 
-    /* Init clipboard */
-    kubernetes_client->clipboard = guac_common_clipboard_alloc(GUAC_KUBERNETES_CLIPBOARD_MAX_LENGTH);
-
     /* Set handlers */
     client->join_handler = guac_kubernetes_user_join_handler;
+    client->join_pending_handler = guac_kubernetes_join_pending_handler;
     client->free_handler = guac_kubernetes_client_free_handler;
     client->leave_handler = guac_kubernetes_user_leave_handler;
 
@@ -133,7 +159,6 @@ int guac_kubernetes_client_free_handler(guac_client* client) {
     if (kubernetes_client->settings != NULL)
         guac_kubernetes_settings_free(kubernetes_client->settings);
 
-    guac_common_clipboard_free(kubernetes_client->clipboard);
     free(kubernetes_client);
     return 0;
 

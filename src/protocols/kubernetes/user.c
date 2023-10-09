@@ -71,13 +71,6 @@ int guac_kubernetes_user_join_handler(guac_user* user, int argc, char** argv) {
 
     }
 
-    /* If not owner, synchronize with current display */
-    else {
-        guac_terminal_dup(kubernetes_client->term, user, user->socket);
-        guac_kubernetes_send_current_argv(user, kubernetes_client);
-        guac_socket_flush(user->socket);
-    }
-
     /* Only handle events if not read-only */
     if (!settings->read_only) {
 
@@ -109,8 +102,8 @@ int guac_kubernetes_user_leave_handler(guac_user* user) {
     guac_kubernetes_client* kubernetes_client =
         (guac_kubernetes_client*) user->client->data;
 
-    /* Update shared cursor state */
-    guac_common_cursor_remove_user(kubernetes_client->term->cursor, user);
+    /* Remove the user from the terminal */
+    guac_terminal_remove_user(kubernetes_client->term, user);
 
     /* Free settings if not owner (owner settings will be freed with client) */
     if (!user->owner) {

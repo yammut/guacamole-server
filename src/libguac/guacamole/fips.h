@@ -17,24 +17,17 @@
  * under the License.
  */
 
-#ifndef GUAC_COMMON_SSH_RSA_COMPAT_H
-#define GUAC_COMMON_SSH_RSA_COMPAT_H
+#ifndef GUAC_FIPS_H
+#define GUAC_FIPS_H
 
-#include "config.h"
-
-#include <openssl/bn.h>
-#include <openssl/rsa.h>
-
-#ifndef HAVE_RSA_GET0_KEY
 /**
- * RSA_get0_key() implementation for versions of OpenSSL which lack this
- * function (pre 1.1).
+ * Returns a non-zero value if FIPS mode is enabled, or zero if FIPS mode
+ * is not enabled.
  *
- * See: https://www.openssl.org/docs/man1.1.0/crypto/RSA_get0_key.html
+ * @return
+ *      A non-zero value if FIPS mode is enabled, or zero if FIPS mode is
+ *      not enabled.
  */
-void RSA_get0_key(const RSA* rsa_key, const BIGNUM** n,
-        const BIGNUM** e, const BIGNUM**d);
-#endif
+int guac_fips_enabled();
 
 #endif
-

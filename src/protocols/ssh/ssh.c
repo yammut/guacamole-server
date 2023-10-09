@@ -20,7 +20,6 @@
 #include "config.h"
 
 #include "argv.h"
-#include "common/recording.h"
 #include "common-ssh/sftp.h"
 #include "common-ssh/ssh.h"
 #include "settings.h"
@@ -36,6 +35,9 @@
 #include <libssh2.h>
 #include <libssh2_sftp.h>
 #include <guacamole/client.h>
+#include <guacamole/recording.h>
+#include <guacamole/socket.h>
+#include <guacamole/timestamp.h>
 #include <guacamole/wol.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -98,7 +100,7 @@ static guac_common_ssh_user* guac_ssh_get_user(guac_client* client) {
             guac_client_log(client, GUAC_LOG_DEBUG,
                     "Initial import failed: %s",
                     guac_common_ssh_key_error());
-  
+
             guac_client_log(client, GUAC_LOG_DEBUG,
                     "Re-attempting private key import (WITH passphrase)");
 
@@ -132,6 +134,32 @@ static guac_common_ssh_user* guac_ssh_get_user(guac_client* client) {
 
     } /* end if key given */
 
+    if (settings->public_key_base64 != NULL) {
+
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Attempting public key import");
+
+        /* Attempt to read public key */
+        if (guac_common_ssh_user_import_public_key(user,
+                    settings->public_key_base64)) {
+
+             /* If failing*/
+                 guac_client_abort(client,
+                        GUAC_PROTOCOL_STATUS_CLIENT_UNAUTHORIZED,
+                        "Auth public key import failed: %s",
+                         guac_common_ssh_key_error());
+
+                 guac_common_ssh_destroy_user(user);
+                 return NULL;
+
+        }
+
+        /* Success */
+        guac_client_log(client, GUAC_LOG_INFO,
+                "Auth public key successfully imported.");
+
+    }
+
     /* If available, get password from settings */
     else if (settings->password != NULL) {
         guac_common_ssh_user_set_password(user, settings->password);
@@ -148,23 +176,23 @@ static guac_common_ssh_user* guac_ssh_get_user(guac_client* client) {
  * A function used to generate a terminal prompt to gather additional
  * credentials from the guac_client during a connection, and using
  * the specified string to generate the prompt for the user.
- * 
+ *
  * @param client
  *     The guac_client object associated with the current connection
  *     where additional credentials are required.
- * 
+ *
  * @param cred_name
  *     The prompt text to display to the screen when prompting for the
  *     additional credentials.
- * 
- * @return 
+ *
+ * @return
  *     The string of credentials gathered from the user.
  */
 static char* guac_ssh_get_credential(guac_client *client, char* cred_name) {
 
     guac_ssh_client* ssh_client = (guac_ssh_client*) client->data;
     return guac_terminal_prompt(ssh_client->term, cred_name, false);
-    
+
 }
 
 void* ssh_input_thread(void* data) {
@@ -206,17 +234,17 @@ void* ssh_client_thread(void* data) {
     if (settings->wol_send_packet) {
         guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet, "
                 "and pausing for %d seconds.", settings->wol_wait_time);
-        
+
         /* Send the Wake-on-LAN request. */
         if (guac_wol_wake(settings->wol_mac_addr, settings->wol_broadcast_addr,
                 settings->wol_udp_port))
             return NULL;
-        
+
         /* If wait time is specified, sleep for that amount of time. */
         if (settings->wol_wait_time > 0)
             guac_timestamp_msleep(settings->wol_wait_time * 1000);
     }
-    
+
     /* Init SSH base libraries */
     if (guac_common_ssh_init(client)) {
         guac_client_abort(client, GUAC_PROTOCOL_STATUS_SERVER_ERROR,
@@ -228,7 +256,7 @@ void* ssh_client_thread(void* data) {
 
     /* Set up screen recording, if requested */
     if (settings->recording_path != NULL) {
-        ssh_client->recording = guac_common_recording_create(client,
+        ssh_client->recording = guac_recording_create(client,
                 settings->recording_path,
                 settings->recording_name,
                 settings->create_recording_path,
@@ -238,12 +266,23 @@ void* ssh_client_thread(void* data) {
                 settings->recording_include_keys);
     }
 
+    /* Create terminal options with required parameters */
+    guac_terminal_options* options = guac_terminal_options_create(
+            settings->width, settings->height, settings->resolution);
+
+    /* Set optional parameters */
+    options->disable_copy = settings->disable_copy;
+    options->max_scrollback = settings->max_scrollback;
+    options->font_name = settings->font_name;
+    options->font_size = settings->font_size;
+    options->color_scheme = settings->color_scheme;
+    options->backspace = settings->backspace;
+
     /* Create terminal */
-    ssh_client->term = guac_terminal_create(client, ssh_client->clipboard,
-            settings->disable_copy, settings->max_scrollback,
-            settings->font_name, settings->font_size, settings->resolution,
-            settings->width, settings->height, settings->color_scheme,
-            settings->backspace);
+    ssh_client->term = guac_terminal_create(client, options);
+
+    /* Free options struct now that it's been used */
+    free(options);
 
     /* Fail if terminal init failed */
     if (ssh_client->term == NULL) {
@@ -347,10 +386,12 @@ void* ssh_client_thread(void* data) {
 
         /* Init handlers for Guacamole-specific console codes */
         if (!settings->sftp_disable_upload)
-            ssh_client->term->upload_path_handler = guac_sftp_set_upload_path;
-        
+            guac_terminal_set_upload_path_handler(ssh_client->term,
+                    guac_sftp_set_upload_path);
+
         if (!settings->sftp_disable_download)
-            ssh_client->term->file_download_handler = guac_sftp_download_file;
+            guac_terminal_set_file_download_handler(ssh_client->term,
+                    guac_sftp_download_file);
 
         guac_client_log(client, GUAC_LOG_DEBUG, "SFTP session initialized");
 
@@ -364,10 +405,11 @@ void* ssh_client_thread(void* data) {
                 "  Backspace may not work as expected.");
 
     /* Request PTY */
+    int term_height = guac_terminal_get_rows(ssh_client->term);
+    int term_width = guac_terminal_get_columns(ssh_client->term);
     if (libssh2_channel_request_pty_ex(ssh_client->term_channel,
             settings->terminal_type, strlen(settings->terminal_type),
-            ssh_ttymodes, ttymodeBytes, ssh_client->term->term_width,
-            ssh_client->term->term_height, 0, 0)) {
+            ssh_ttymodes, ttymodeBytes, term_width, term_height, 0, 0)) {
         guac_client_abort(client, GUAC_PROTOCOL_STATUS_UPSTREAM_ERROR, "Unable to allocate PTY.");
         return NULL;
     }
@@ -438,8 +480,10 @@ void* ssh_client_thread(void* data) {
         /* Send keepalive at configured interval */
         if (settings->server_alive_interval > 0) {
             timeout = 0;
-            if (libssh2_keepalive_send(ssh_client->session->session, &timeout) > 0)
+            if (libssh2_keepalive_send(ssh_client->session->session, &timeout) > 0) {
+                pthread_mutex_unlock(&(ssh_client->term_channel_lock));
                 break;
+            }
             timeout *= 1000;
         }
         /* If keepalive is not configured, sleep for the default of 1 second */

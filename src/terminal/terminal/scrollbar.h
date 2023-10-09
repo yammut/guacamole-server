@@ -20,7 +20,12 @@
 #ifndef GUAC_TERMINAL_SCROLLBAR_H
 #define GUAC_TERMINAL_SCROLLBAR_H
 
-#include "config.h"
+/**
+ * Constants, structures, and function definitions related to the terminal scrollbar.
+ *
+ * @file scrollbar.h
+ */
+
 
 #include <guacamole/client.h>
 #include <guacamole/layer.h>
@@ -250,22 +255,22 @@ void guac_terminal_scrollbar_free(guac_terminal_scrollbar* scrollbar);
 void guac_terminal_scrollbar_flush(guac_terminal_scrollbar* scrollbar);
 
 /**
- * Forces a complete redraw / resync of scrollbar state for the given user that
- * has just joined the connection, sending the necessary instructions to
+ * Forces a complete redraw / resync of scrollbar state for all joinging users
+ * associated with the provided socket, sending the necessary instructions to
  * completely recreate and redraw the scrollbar rendering over the given
  * socket.
  *
  * @param scrollbar
- *     The scrollbar to sync to the given user.
+ *     The scrollbar to sync to the given users.
  *
- * @param user
- *     The user that has just joined the connection.
+ * @param client
+ *     The client associated with the joining users.
  *
  * @param socket
  *     The socket over which any necessary instructions should be sent.
  */
 void guac_terminal_scrollbar_dup(guac_terminal_scrollbar* scrollbar,
-        guac_user* user, guac_socket* socket);
+        guac_client* client, guac_socket* socket);
 
 /**
  * Sets the minimum and maximum allowed scroll values of the given scrollbar

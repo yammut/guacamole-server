@@ -27,23 +27,17 @@
 #include <sys/types.h>
 #include <regex.h>
 #include <stdbool.h>
-
-/**
- * The name of the font to use for the terminal if no name is specified.
- */
-#define GUAC_TELNET_DEFAULT_FONT_NAME "monospace" 
-
-/**
- * The size of the font to use for the terminal if no font size is specified,
- * in points.
- */
-#define GUAC_TELNET_DEFAULT_FONT_SIZE 12
-
 /**
  * The port to connect to when initiating any telnet connection, if no other
  * port is specified.
  */
 #define GUAC_TELNET_DEFAULT_PORT "23"
+
+/**
+ * The default number of seconds to wait for a successful connection before
+ * timing out.
+ */
+#define GUAC_TELNET_DEFAULT_TIMEOUT 10
 
 /**
  * The filename to use for the typescript, if not specified.
@@ -68,11 +62,6 @@
 #define GUAC_TELNET_DEFAULT_PASSWORD_REGEX "[Pp]assword:"
 
 /**
- * The default maximum scrollback size in rows.
- */
-#define GUAC_TELNET_DEFAULT_MAX_SCROLLBACK 1000
-
-/**
  * Settings for the telnet connection. The values for this structure are parsed
  * from the arguments given during the Guacamole protocol handshake using the
  * guac_telnet_parse_args() function.
@@ -88,6 +77,11 @@ typedef struct guac_telnet_settings {
      * The port of the telnet server to connect to.
      */
     char* port;
+
+    /**
+     * The number of seconds to wait for a connection before timing out.
+     */
+    int timeout;
 
     /**
      * The name of the user to login as, if any. If no username is specified,
