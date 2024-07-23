@@ -17,9 +17,10 @@
  * under the License.
  */
 
-
 #include "terminal/buffer.h"
 #include "terminal/common.h"
+
+#include <guacamole/mem.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,7 @@ guac_terminal_buffer* guac_terminal_buffer_alloc(int rows, guac_terminal_char* d
 
     /* Allocate scrollback */
     guac_terminal_buffer* buffer =
-        malloc(sizeof(guac_terminal_buffer));
+        guac_mem_alloc(sizeof(guac_terminal_buffer));
 
     int i;
     guac_terminal_buffer_row* row;
@@ -38,8 +39,7 @@ guac_terminal_buffer* guac_terminal_buffer_alloc(int rows, guac_terminal_char* d
     buffer->available = rows;
     buffer->top = 0;
     buffer->length = 0;
-    buffer->rows = malloc(sizeof(guac_terminal_buffer_row) *
-            buffer->available);
+    buffer->rows = guac_mem_alloc(sizeof(guac_terminal_buffer_row), buffer->available);
 
     /* Init scrollback rows */
     row = buffer->rows;
@@ -48,7 +48,7 @@ guac_terminal_buffer* guac_terminal_buffer_alloc(int rows, guac_terminal_char* d
         /* Allocate row  */
         row->available = 256;
         row->length = 0;
-        row->characters = malloc(sizeof(guac_terminal_char) * row->available);
+        row->characters = guac_mem_alloc(sizeof(guac_terminal_char), row->available);
 
         /* Next row */
         row++;
@@ -66,13 +66,13 @@ void guac_terminal_buffer_free(guac_terminal_buffer* buffer) {
 
     /* Free all rows */
     for (i=0; i<buffer->available; i++) {
-        free(row->characters);
+        guac_mem_free(row->characters);
         row++;
     }
 
     /* Free actual buffer */
-    free(buffer->rows);
-    free(buffer);
+    guac_mem_free(buffer->rows);
+    guac_mem_free(buffer);
 
 }
 
@@ -95,8 +95,9 @@ guac_terminal_buffer_row* guac_terminal_buffer_get_row(guac_terminal_buffer* buf
 
         /* Expand if necessary */
         if (width > buffer_row->available) {
-            buffer_row->available = width*2;
-            buffer_row->characters = realloc(buffer_row->characters, sizeof(guac_terminal_char) * buffer_row->available);
+            buffer_row->available = guac_mem_ckd_mul_or_die(width, 2);
+            buffer_row->characters = guac_mem_realloc_or_die(buffer_row->characters,
+                    sizeof(guac_terminal_char), buffer_row->available);
         }
 
         /* Initialize new part of row */

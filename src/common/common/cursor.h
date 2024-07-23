@@ -17,7 +17,6 @@
  * under the License.
  */
 
-
 #ifndef GUAC_COMMON_CURSOR_H
 #define GUAC_COMMON_CURSOR_H
 
@@ -68,7 +67,7 @@ typedef struct guac_common_cursor {
     /**
      * The size of the image data buffer, in bytes.
      */
-    int image_buffer_size;
+    size_t image_buffer_size;
 
     /**
      * The current cursor image, if any. If the mouse cursor has not yet been
@@ -118,7 +117,7 @@ typedef struct guac_common_cursor {
     int button_mask;
 
     /**
-     * The server timestamp representing the point in time when the mousr
+     * The server timestamp representing the point in time when the mouse
      * location was last updated.
      */
     guac_timestamp timestamp;

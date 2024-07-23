@@ -24,6 +24,7 @@
 #include <cairo/cairo.h>
 #include <guacamole/client.h>
 #include <guacamole/layer.h>
+#include <guacamole/mem.h>
 #include <guacamole/protocol.h>
 #include <guacamole/socket.h>
 #include <guacamole/timestamp.h>
@@ -279,7 +280,6 @@ static int __guac_common_surface_is_opaque(guac_common_surface* surface,
 
 }
 
-
 /**
  * Returns whether the given rectangle should be combined into the existing
  * dirty rectangle, to be eventually flushed as image data, or would be best
@@ -396,7 +396,7 @@ static unsigned int __guac_common_surface_calculate_framerate(
     int x, y;
 
     /* Calculate heat map dimensions */
-    int heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(surface->width);
+    size_t heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(surface->width);
 
     /* Calculate minimum X/Y coordinates intersecting given rect */
     int min_x = rect->x / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
@@ -615,7 +615,7 @@ static void __guac_common_surface_touch_rect(guac_common_surface* surface,
     int x, y;
 
     /* Calculate heat map dimensions */
-    int heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(surface->width);
+    size_t heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(surface->width);
 
     /* Calculate minimum X/Y coordinates intersecting given rect */
     int min_x = rect->x / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
@@ -1227,11 +1227,11 @@ guac_common_surface* guac_common_surface_alloc(guac_client* client,
         guac_socket* socket, const guac_layer* layer, int w, int h) {
 
     /* Calculate heat map dimensions */
-    int heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(w);
-    int heat_height = GUAC_COMMON_SURFACE_HEAT_DIMENSION(h);
+    size_t heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(w);
+    size_t heat_height = GUAC_COMMON_SURFACE_HEAT_DIMENSION(h);
 
     /* Init surface */
-    guac_common_surface* surface = calloc(1, sizeof(guac_common_surface));
+    guac_common_surface* surface = guac_mem_zalloc(sizeof(guac_common_surface));
     surface->client = client;
     surface->socket = socket;
     surface->layer = layer;
@@ -1244,10 +1244,10 @@ guac_common_surface* guac_common_surface_alloc(guac_client* client,
 
     /* Create corresponding Cairo surface */
     surface->stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, w);
-    surface->buffer = calloc(h, surface->stride);
+    surface->buffer = guac_mem_zalloc(h, surface->stride);
 
     /* Create corresponding heat map */
-    surface->heat_map = calloc(heat_width * heat_height,
+    surface->heat_map = guac_mem_zalloc(heat_width, heat_height,
             sizeof(guac_common_surface_heat_cell));
 
     /* Reset clipping rect */
@@ -1274,9 +1274,9 @@ void guac_common_surface_free(guac_common_surface* surface) {
 
     pthread_mutex_destroy(&surface->_lock);
 
-    free(surface->heat_map);
-    free(surface->buffer);
-    free(surface);
+    guac_mem_free(surface->heat_map);
+    guac_mem_free(surface->buffer);
+    guac_mem_free(surface);
 
 }
 
@@ -1299,8 +1299,8 @@ void guac_common_surface_resize(guac_common_surface* surface, int w, int h) {
     int sy = 0;
 
     /* Calculate heat map dimensions */
-    int heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(w);
-    int heat_height = GUAC_COMMON_SURFACE_HEAT_DIMENSION(h);
+    size_t heat_width = GUAC_COMMON_SURFACE_HEAT_DIMENSION(w);
+    size_t heat_height = GUAC_COMMON_SURFACE_HEAT_DIMENSION(h);
 
     /* Copy old surface data */
     old_buffer = surface->buffer;
@@ -1311,7 +1311,7 @@ void guac_common_surface_resize(guac_common_surface* surface, int w, int h) {
     surface->width  = w;
     surface->height = h;
     surface->stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, w);
-    surface->buffer = calloc(h, surface->stride);
+    surface->buffer = guac_mem_zalloc(h, surface->stride);
     __guac_common_bound_rect(surface, &surface->clip_rect, NULL, NULL);
 
     /* Copy relevant old data */
@@ -1319,11 +1319,11 @@ void guac_common_surface_resize(guac_common_surface* surface, int w, int h) {
     __guac_common_surface_put(old_buffer, old_stride, &sx, &sy, surface, &old_rect, 1);
 
     /* Free old data */
-    free(old_buffer);
+    guac_mem_free(old_buffer);
 
     /* Allocate completely new heat map (can safely discard old stats) */
-    free(surface->heat_map);
-    surface->heat_map = calloc(heat_width * heat_height,
+    guac_mem_free(surface->heat_map);
+    surface->heat_map = guac_mem_zalloc(heat_width, heat_height,
             sizeof(guac_common_surface_heat_cell));
 
     /* Resize dirty rect to fit new surface dimensions */
@@ -2008,12 +2008,13 @@ void guac_common_surface_dup(guac_common_surface* surface,
         guac_protocol_send_move(socket, surface->layer,
                 surface->parent, surface->x, surface->y, surface->z);
 
-        /* Synchronize multi-touch support level */
-        guac_protocol_send_set_int(surface->socket, surface->layer,
-                GUAC_PROTOCOL_LAYER_PARAMETER_MULTI_TOUCH,
-                surface->touches);
-
     }
+
+    /* Synchronize multi-touch support level */
+    else if (surface->layer->index == 0)
+        guac_protocol_send_set_int(socket, surface->layer,
+                GUAC_PROTOCOL_LAYER_PARAMETER_MULTI_TOUCH,
+                    surface->touches);
 
     /* Sync size to new socket */
     guac_protocol_send_size(socket, surface->layer,

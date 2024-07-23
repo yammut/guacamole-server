@@ -29,6 +29,10 @@ ACLOCAL_AMFLAGS = -I m4
 lib_LTLIBRARIES = libguac.la
 SUBDIRS = . tests
 
+#
+# Public headers
+#
+
 libguacincdir = $(includedir)/guacamole
 
 libguacinc_HEADERS =                  \
@@ -48,6 +52,7 @@ libguacinc_HEADERS =                  \
     guacamole/hash.h                  \
     guacamole/layer.h                 \
     guacamole/layer-types.h           \
+    guacamole/mem.h                   \
     guacamole/object.h                \
     guacamole/object-types.h          \
     guacamole/parser-constants.h      \
@@ -65,6 +70,7 @@ libguacinc_HEADERS =                  \
     guacamole/socket-constants.h      \
     guacamole/socket.h                \
     guacamole/socket-fntypes.h        \
+    guacamole/socket-tcp.h            \
     guacamole/socket-types.h          \
     guacamole/stream.h                \
     guacamole/stream-types.h          \
@@ -78,6 +84,19 @@ libguacinc_HEADERS =                  \
     guacamole/user-types.h            \
     guacamole/wol.h                   \
     guacamole/wol-constants.h
+
+#
+# Private, installed headers
+#
+
+libguacprivincdir = $(includedir)/guacamole/private
+
+libguacprivinc_HEADERS =              \
+    guacamole/private/mem.h
+
+#
+# Private, non-installed headers
+#
 
 noinst_HEADERS =       \
     id.h               \
@@ -98,6 +117,7 @@ libguac_la_SOURCES =   \
     fips.c             \
     hash.c             \
     id.c               \
+    mem.c              \
     rwlock.c           \
     palette.c          \
     parser.c           \
@@ -109,6 +129,7 @@ libguac_la_SOURCES =   \
     socket-broadcast.c \
     socket-fd.c        \
     socket-nest.c      \
+    socket-tcp.c       \
     socket-tee.c       \
     string.c           \
     timestamp.c        \
@@ -141,13 +162,14 @@ libguac_la_CFLAGS = \
     -Werror -Wall -pedantic
 
 libguac_la_LDFLAGS =     \
-    -version-info 22:0:1 \
+    -version-info 24:0:0 \
     -no-undefined        \
     @CAIRO_LIBS@         \
     @DL_LIBS@            \
     @JPEG_LIBS@          \
     @PNG_LIBS@           \
     @PTHREAD_LIBS@       \
+    @RT_LIBS@            \
     @SSL_LIBS@           \
     @UUID_LIBS@          \
     @VORBIS_LIBS@        \

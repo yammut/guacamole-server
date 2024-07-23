@@ -17,7 +17,6 @@
  * under the License.
  */
 
-
 #ifndef _GUAC_TERMINAL_TYPES_H
 #define _GUAC_TERMINAL_TYPES_H
 
@@ -41,6 +40,11 @@
  * GUAC_CHAR_CONTINUATION characters.
  */
 #define GUAC_CHAR_CONTINUATION -1
+
+/**
+ * The ASCII code of space.
+ */
+#define GUAC_CHAR_SPACE 32
 
 /**
  * Terminal attributes, as can be applied to a single character.

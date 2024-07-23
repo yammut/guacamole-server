@@ -24,6 +24,7 @@
 #include <freerdp/freerdp.h>
 #include <guacamole/audio.h>
 #include <guacamole/client.h>
+#include <guacamole/mem.h>
 #include <winpr/wtypes.h>
 
 #include <inttypes.h>
@@ -93,14 +94,14 @@ static void guac_rdp_beep_fill_triangle_wave(unsigned char* buffer,
 static void guac_rdp_beep_write_pcm(guac_audio_stream* audio,
         int frequency, int duration) {
 
-    int buffer_size = audio->rate * duration / 1000;
-    unsigned char* buffer = malloc(buffer_size);
+    size_t buffer_size = guac_mem_ckd_mul_or_die(audio->rate, duration) / 1000;
+    unsigned char* buffer = guac_mem_alloc(buffer_size);
 
     /* Beep for given frequency/duration using a simple triangle wave */
     guac_rdp_beep_fill_triangle_wave(buffer, frequency, audio->rate, buffer_size);
     guac_audio_stream_write_pcm(audio, buffer, buffer_size);
 
-    free(buffer);
+    guac_mem_free(buffer);
 
 }
 
@@ -114,7 +115,7 @@ BOOL guac_rdp_beep_play_sound(rdpContext* context,
     /* Ignore if audio is not enabled */
     if (!settings->audio_enabled) {
         guac_client_log(client, GUAC_LOG_DEBUG, "Ignoring request to beep "
-                "for %" PRIu32 " millseconds at %" PRIu32 " Hz as audio is "
+                "for %" PRIu32 " milliseconds at %" PRIu32 " Hz as audio is "
                 "disabled.", play_sound->duration, play_sound->frequency);
         return TRUE;
     }
@@ -127,7 +128,7 @@ BOOL guac_rdp_beep_play_sound(rdpContext* context,
     /* Stream availability is not guaranteed */
     if (beep == NULL) {
         guac_client_log(client, GUAC_LOG_DEBUG, "Ignoring request to beep "
-                "for %" PRIu32 " millseconds at %" PRIu32 " Hz as no audio "
+                "for %" PRIu32 " milliseconds at %" PRIu32 " Hz as no audio "
                 "stream could be allocated.", play_sound->duration,
                 play_sound->frequency);
         return TRUE;

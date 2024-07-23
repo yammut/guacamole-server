@@ -51,6 +51,11 @@
 #define GUAC_TERMINAL_OK          "\x1B[0n"
 
 /**
+ * Alternative buffer CSI sequence.
+ */
+#define GUAC_TERMINAL_ALT_BUFFER   1049
+
+/**
  * Advances the cursor to the next row, scrolling if the cursor would otherwise
  * leave the scrolling region. If the cursor is already outside the scrolling
  * region, the cursor is prevented from leaving the terminal bounds.
@@ -537,7 +542,7 @@ static int guac_terminal_parse_xterm256_index(guac_terminal* terminal,
 
 /**
  * Parses an xterm SGR sequence specifying the index of a color within the
- * 256-color palette, or specfying the RGB values of a color. The number of
+ * 256-color palette, or specifying the RGB values of a color. The number of
  * arguments required by these sequences varies. If a 256-color sequence is
  * recognized, the number of arguments parsed is returned.
  *
@@ -835,6 +840,32 @@ int guac_terminal_csi(guac_terminal* term, unsigned char c) {
 
                 break;
 
+            /* S: Scroll Up by amount */
+            case 'S':
+
+                /* Get move amount */
+                amount = argv[0];
+                if (amount == 0) amount = 1;
+
+                /* Scroll up */
+                guac_terminal_scroll_up(term, term->scroll_start,
+                        term->scroll_end, amount);
+
+                break;
+
+            /* T: Scroll Down by amount */
+            case 'T':
+
+                /* Get move amount */
+                amount = argv[0];
+                if (amount == 0) amount = 1;
+
+                /* Scroll Down */
+                guac_terminal_scroll_down(term, term->scroll_start,
+                        term->scroll_end, amount);
+
+                break;
+
             /* X: Erase characters (no scroll) */
             case 'X':
 
@@ -885,6 +916,10 @@ int guac_terminal_csi(guac_terminal* term, unsigned char c) {
                 if (flag != NULL)
                     *flag = true;
 
+                /* Open alternate screen buffer */
+                if (argv[0] == GUAC_TERMINAL_ALT_BUFFER)
+                    guac_terminal_switch_buffers(term, true);
+
                 break;
 
             /* l: Reset Mode */
@@ -894,6 +929,10 @@ int guac_terminal_csi(guac_terminal* term, unsigned char c) {
                 flag = __guac_terminal_get_flag(term, argv[0], private_mode_character);
                 if (flag != NULL)
                     *flag = false;
+                
+                /* Close alternate screen buffer */
+                if (argv[0] == GUAC_TERMINAL_ALT_BUFFER)
+                    guac_terminal_switch_buffers(term, false);
 
                 break;
 
@@ -1241,7 +1280,6 @@ int guac_terminal_set_scrollback(guac_terminal* term, unsigned char c) {
     return 0;
 
 }
-
 
 int guac_terminal_window_title(guac_terminal* term, unsigned char c) {
 

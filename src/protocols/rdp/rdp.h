@@ -42,13 +42,29 @@
 
 #include <freerdp/codec/color.h>
 #include <freerdp/freerdp.h>
+#include <freerdp/client/rail.h>
 #include <guacamole/audio.h>
 #include <guacamole/client.h>
+#include <guacamole/rwlock.h>
 #include <guacamole/recording.h>
 #include <winpr/wtypes.h>
 
 #include <pthread.h>
 #include <stdint.h>
+
+#ifdef HAVE_WINPR_ALIGNED
+#define GUAC_ALIGNED_FREE winpr_aligned_free
+#define GUAC_ALIGNED_MALLOC winpr_aligned_malloc
+#else
+#define GUAC_ALIGNED_FREE _aligned_free
+#define GUAC_ALIGNED_MALLOC _aligned_malloc
+#endif
+
+#ifdef FREERDP_HAS_CONTEXT
+#define GUAC_RDP_CONTEXT(rdp_instance) ((rdp_instance)->context)
+#else
+#define GUAC_RDP_CONTEXT(rdp_instance) ((rdp_instance))
+#endif
 
 /**
  * RDP-specific client data.
@@ -188,13 +204,19 @@ typedef struct guac_rdp_client {
      * from running when RDP data structures are allocated or freed
      * by the client thread.
      */
-    pthread_rwlock_t lock;
+    guac_rwlock lock;
 
     /**
      * Lock which synchronizes the sending of each RDP message, ensuring
      * attempts to send RDP messages never overlap.
      */
     pthread_mutex_t message_lock;
+
+    /**
+     * A pointer to the RAIL interface provided by the RDP client when rail is
+     * in use.
+     */
+    RailClientContext* rail_interface;
 
 } guac_rdp_client;
 
@@ -237,4 +259,3 @@ typedef struct rdp_freerdp_context {
 void* guac_rdp_client_thread(void* data);
 
 #endif
-

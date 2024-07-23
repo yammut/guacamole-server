@@ -53,12 +53,6 @@
 #endif
 
 #include <freerdp/addin.h>
-#include <freerdp/cache/bitmap.h>
-#include <freerdp/cache/brush.h>
-#include <freerdp/cache/glyph.h>
-#include <freerdp/cache/offscreen.h>
-#include <freerdp/cache/palette.h>
-#include <freerdp/cache/pointer.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/freerdp.h>
@@ -70,11 +64,13 @@
 #include <guacamole/argv.h>
 #include <guacamole/audio.h>
 #include <guacamole/client.h>
+#include <guacamole/mem.h>
 #include <guacamole/protocol.h>
 #include <guacamole/recording.h>
 #include <guacamole/socket.h>
 #include <guacamole/string.h>
 #include <guacamole/timestamp.h>
+#include <guacamole/wol-constants.h>
 #include <guacamole/wol.h>
 #include <winpr/error.h>
 #include <winpr/synch.h>
@@ -85,7 +81,7 @@
 
 BOOL rdp_freerdp_pre_connect(freerdp* instance) {
 
-    rdpContext* context = instance->context;
+    rdpContext* context = GUAC_RDP_CONTEXT(instance);
     rdpGraphics* graphics = context->graphics;
 
     guac_client* client = ((rdp_freerdp_context*) context)->client;
@@ -108,8 +104,13 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
 
     /* Load "AUDIO_INPUT" plugin for audio input*/
     if (settings->enable_audio_input) {
+        /* Upgrade the lock to write temporarily for setting the newly allocated audio buffer */
+        guac_rwlock_acquire_write_lock(&(rdp_client->lock));
         rdp_client->audio_input = guac_rdp_audio_buffer_alloc(client);
-        guac_rdp_audio_load_plugin(instance->context);
+        guac_rdp_audio_load_plugin(GUAC_RDP_CONTEXT(instance));
+
+        /* Downgrade the lock to allow for concurrent read access */
+        guac_rwlock_release_lock(&(rdp_client->lock));
     }
 
     /* Load "cliprdr" service if not disabled */
@@ -172,42 +173,35 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
     graphics_register_pointer(graphics, &pointer);
 
     /* Beep on receipt of Play Sound PDU */
-    instance->update->PlaySound = guac_rdp_beep_play_sound;
+    GUAC_RDP_CONTEXT(instance)->update->PlaySound = guac_rdp_beep_play_sound;
 
     /* Automatically synchronize keyboard locks when changed server-side */
-    instance->update->SetKeyboardIndicators = guac_rdp_keyboard_set_indicators;
+    GUAC_RDP_CONTEXT(instance)->update->SetKeyboardIndicators = guac_rdp_keyboard_set_indicators;
 
     /* Set up GDI */
-    instance->update->DesktopResize = guac_rdp_gdi_desktop_resize;
-    instance->update->BeginPaint = guac_rdp_gdi_begin_paint;
-    instance->update->EndPaint = guac_rdp_gdi_end_paint;
-    instance->update->SetBounds = guac_rdp_gdi_set_bounds;
+    GUAC_RDP_CONTEXT(instance)->update->DesktopResize = guac_rdp_gdi_desktop_resize;
+    GUAC_RDP_CONTEXT(instance)->update->BeginPaint = guac_rdp_gdi_begin_paint;
+    GUAC_RDP_CONTEXT(instance)->update->EndPaint = guac_rdp_gdi_end_paint;
+    GUAC_RDP_CONTEXT(instance)->update->SetBounds = guac_rdp_gdi_set_bounds;
 
-    instance->update->SurfaceFrameMarker = guac_rdp_gdi_surface_frame_marker;
-    instance->update->altsec->FrameMarker = guac_rdp_gdi_frame_marker;
+    GUAC_RDP_CONTEXT(instance)->update->SurfaceFrameMarker = guac_rdp_gdi_surface_frame_marker;
+    GUAC_RDP_CONTEXT(instance)->update->altsec->FrameMarker = guac_rdp_gdi_frame_marker;
 
-    rdpPrimaryUpdate* primary = instance->update->primary;
+    rdpPrimaryUpdate* primary = GUAC_RDP_CONTEXT(instance)->update->primary;
     primary->DstBlt = guac_rdp_gdi_dstblt;
     primary->PatBlt = guac_rdp_gdi_patblt;
     primary->ScrBlt = guac_rdp_gdi_scrblt;
     primary->MemBlt = guac_rdp_gdi_memblt;
     primary->OpaqueRect = guac_rdp_gdi_opaquerect;
 
-    pointer_cache_register_callbacks(instance->update);
-    glyph_cache_register_callbacks(instance->update);
-    brush_cache_register_callbacks(instance->update);
-    bitmap_cache_register_callbacks(instance->update);
-    offscreen_cache_register_callbacks(instance->update);
-    palette_cache_register_callbacks(instance->update);
-
     /* Load "rdpgfx" plugin for Graphics Pipeline Extension */
     if (settings->enable_gfx)
         guac_rdp_rdpgfx_load_plugin(context);
 
     /* Load plugin providing Dynamic Virtual Channel support, if required */
-    if (instance->settings->SupportDynamicChannels &&
+    if (freerdp_settings_get_bool(GUAC_RDP_CONTEXT(instance)->settings, FreeRDP_SupportDynamicChannels) &&
             guac_freerdp_channels_load_plugin(context, "drdynvc",
-                instance->settings)) {
+                GUAC_RDP_CONTEXT(instance)->settings)) {
         guac_client_log(client, GUAC_LOG_WARNING,
                 "Failed to load drdynvc plugin. Display update and audio "
                 "input support will be disabled.");
@@ -248,7 +242,7 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
 static BOOL rdp_freerdp_authenticate(freerdp* instance, char** username,
         char** password, char** domain) {
 
-    rdpContext* context = instance->context;
+    rdpContext* context = GUAC_RDP_CONTEXT(instance);
     guac_client* client = ((rdp_freerdp_context*) context)->client;
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
     guac_rdp_settings* settings = rdp_client->settings;
@@ -297,9 +291,9 @@ static BOOL rdp_freerdp_authenticate(freerdp* instance, char** username,
         guac_argv_await((const char**) params);
         
         /* Free old values and get new values from settings. */
-        free(*username);
-        free(*password);
-        free(*domain);
+        guac_mem_free(*username);
+        guac_mem_free(*password);
+        guac_mem_free(*domain);
         *username = guac_strdup(settings->username);
         *password = guac_strdup(settings->password);
         *domain = guac_strdup(settings->domain);
@@ -390,7 +384,7 @@ static DWORD rdp_freerdp_verify_certificate(freerdp* instance,
         const char* fingerprint, BOOL host_mismatch) {
 #endif
 
-    rdpContext* context = instance->context;
+    rdpContext* context = GUAC_RDP_CONTEXT(instance);
     guac_client* client = ((rdp_freerdp_context*) context)->client;
     guac_rdp_client* rdp_client =
         (guac_rdp_client*) client->data;
@@ -426,7 +420,7 @@ static int rdp_guac_client_wait_for_messages(guac_client* client,
     freerdp* rdp_inst = rdp_client->rdp_inst;
 
     HANDLE handles[GUAC_RDP_MAX_FILE_DESCRIPTORS];
-    int num_handles = freerdp_get_event_handles(rdp_inst->context, handles,
+    int num_handles = freerdp_get_event_handles(GUAC_RDP_CONTEXT(rdp_inst), handles,
             GUAC_RDP_MAX_FILE_DESCRIPTORS);
 
     /* Wait for data and construct a reasonable frame */
@@ -478,7 +472,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
     /* Init random number generator */
     srandom(time(NULL));
 
-    pthread_rwlock_wrlock(&(rdp_client->lock));
+    guac_rwlock_acquire_write_lock(&(rdp_client->lock));
 
     /* Create display */
     rdp_client->display = guac_common_display_alloc(client,
@@ -515,7 +509,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
         goto fail;
     }
 
-    ((rdp_freerdp_context*) rdp_inst->context)->client = client;
+    ((rdp_freerdp_context*) GUAC_RDP_CONTEXT(rdp_inst))->client = client;
 
     /* Load keymap into client */
     rdp_client->keyboard = guac_rdp_keyboard_alloc(client,
@@ -524,11 +518,23 @@ static int guac_rdp_handle_connection(guac_client* client) {
     /* Set default pointer */
     guac_common_cursor_set_pointer(rdp_client->display->cursor);
 
+    /* 
+     * Downgrade the lock to allow for concurrent read access.
+     * Access to read locks needs to be made available for other processes such
+     * as the join_pending_handler to use while we await credentials from the user.
+     */
+    guac_rwlock_release_lock(&(rdp_client->lock));
+    guac_rwlock_acquire_read_lock(&(rdp_client->lock));
+
     /* Connect to RDP server */
     if (!freerdp_connect(rdp_inst)) {
         guac_rdp_client_abort(client, rdp_inst);
         goto fail;
     }
+
+    /* Upgrade to write lock again for further exclusive operations */
+    guac_rwlock_release_lock(&(rdp_client->lock));
+    guac_rwlock_acquire_write_lock(&(rdp_client->lock));
 
     /* Connection complete */
     rdp_client->rdp_inst = rdp_inst;
@@ -536,7 +542,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
     /* Signal that reconnect has been completed */
     guac_rdp_disp_reconnect_complete(rdp_client->disp);
 
-    pthread_rwlock_unlock(&(rdp_client->lock));
+    guac_rwlock_release_lock(&(rdp_client->lock));
 
     /* Handle messages from RDP server while client is running */
     while (client->state == GUAC_CLIENT_RUNNING
@@ -561,7 +567,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
                 /* Handle any queued FreeRDP events (this may result in RDP
                  * messages being sent) */
                 pthread_mutex_lock(&(rdp_client->message_lock));
-                int event_result = freerdp_check_event_handles(rdp_inst->context);
+                int event_result = freerdp_check_event_handles(GUAC_RDP_CONTEXT(rdp_inst));
                 pthread_mutex_unlock(&(rdp_client->message_lock));
 
                 /* Abort if FreeRDP event handling fails */
@@ -604,7 +610,12 @@ static int guac_rdp_handle_connection(guac_client* client) {
         }
 
         /* Test whether the RDP server is closing the connection */
-        int connection_closing = freerdp_shall_disconnect(rdp_inst);
+        int connection_closing;
+#ifdef HAVE_DISCONNECT_CONTEXT
+        connection_closing = freerdp_shall_disconnect_context(rdp_inst->context);
+#else
+        connection_closing = freerdp_shall_disconnect(rdp_inst);
+#endif
 
         /* Close connection cleanly if server is disconnecting */
         if (connection_closing)
@@ -626,7 +637,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
 
     }
 
-    pthread_rwlock_wrlock(&(rdp_client->lock));
+    guac_rwlock_acquire_write_lock(&(rdp_client->lock));
 
     /* Clean up print job, if active */
     if (rdp_client->active_job != NULL) {
@@ -661,7 +672,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
     guac_common_display_free(rdp_client->display);
     rdp_client->display = NULL;
 
-    pthread_rwlock_unlock(&(rdp_client->lock));
+    guac_rwlock_release_lock(&(rdp_client->lock));
 
     /* Client is now disconnected */
     guac_client_log(client, GUAC_LOG_INFO, "Internal RDP client disconnected");
@@ -669,7 +680,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
     return 0;
 
 fail:
-    pthread_rwlock_unlock(&(rdp_client->lock));
+    guac_rwlock_release_lock(&(rdp_client->lock));
     return 1;
 
 }
@@ -680,19 +691,49 @@ void* guac_rdp_client_thread(void* data) {
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
     guac_rdp_settings* settings = rdp_client->settings;
 
-    /* If Wake-on-LAN is enabled, try to wake. */
+    /* If Wake-on-LAN is enabled, attempt to wake. */
     if (settings->wol_send_packet) {
-        guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet, "
-                "and pausing for %d seconds.", settings->wol_wait_time);
-        
-        /* Send the Wake-on-LAN request. */
-        if (guac_wol_wake(settings->wol_mac_addr, settings->wol_broadcast_addr,
-                settings->wol_udp_port))
+
+        /**
+         * If wait time is set, send the wake packet and try to connect to the
+         * server, failing if the server does not respond.
+         */
+        if (settings->wol_wait_time > 0) {
+            guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet, "
+                    "and pausing for %d seconds.", settings->wol_wait_time);
+
+            /* char representation of a port should be, at most, 5 digits plus terminator. */
+            char* str_port = guac_mem_alloc(6);
+            if (guac_itoa(str_port, settings->port) < 1) {
+                guac_client_log(client, GUAC_LOG_ERROR, "Failed to convert port to integer for WOL function.");
+                guac_mem_free(str_port);
+                return NULL;
+            }
+
+            /* Send the Wake-on-LAN request and wait until the server is responsive. */
+            if (guac_wol_wake_and_wait(settings->wol_mac_addr,
+                    settings->wol_broadcast_addr,
+                    settings->wol_udp_port,
+                    settings->wol_wait_time,
+                    GUAC_WOL_DEFAULT_CONNECT_RETRIES,
+                    settings->hostname,
+                    (const char *) str_port)) {
+                guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet, or server failed to wake up.");
+                guac_mem_free(str_port);
+                return NULL;
+            }
+
+            guac_mem_free(str_port);
+
+        }
+
+        /* Just send the packet and continue the connection, or return if failed. */
+        else if(guac_wol_wake(settings->wol_mac_addr,
+                    settings->wol_broadcast_addr,
+                    settings->wol_udp_port)) {
+            guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet.");
             return NULL;
-        
-        /* If wait time is specified, sleep for that amount of time. */
-        if (settings->wol_wait_time > 0)
-            guac_timestamp_msleep(settings->wol_wait_time * 1000);
+        }
     }
     
     /* If audio enabled, choose an encoder */
@@ -823,7 +864,8 @@ void* guac_rdp_client_thread(void* data) {
                 !settings->recording_exclude_output,
                 !settings->recording_exclude_mouse,
                 !settings->recording_exclude_touch,
-                settings->recording_include_keys);
+                settings->recording_include_keys,
+                settings->recording_write_existing);
     }
 
     /* Continue handling connections until error or client disconnect */

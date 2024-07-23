@@ -17,7 +17,6 @@
  * under the License.
  */
 
-
 #include "common/clipboard.h"
 #include "terminal/buffer.h"
 #include "terminal/display.h"
@@ -195,7 +194,7 @@ void guac_terminal_select_update(guac_terminal* terminal, int row, int column) {
 
     /* Only update if selection has changed */
     if (row != terminal->selection_end_row
-        || column <  terminal->selection_end_column
+        || column <=  terminal->selection_end_column
         || column >= terminal->selection_end_column + terminal->selection_end_width) {
 
         int width = guac_terminal_find_char(terminal, row, &column);
@@ -253,7 +252,7 @@ void guac_terminal_select_resume(guac_terminal* terminal, int row, int column) {
 
 /**
  * Appends the text within the given subsection of a terminal row to the
- * clipboard. The provided coordinates are considered inclusiveley (the
+ * clipboard. The provided coordinates are considered inclusively (the
  * characters at the start and end column are included in the copied
  * text). Any out-of-bounds coordinates will be automatically clipped within
  * the bounds of the given row.
@@ -284,6 +283,7 @@ static void guac_terminal_clipboard_append_row(guac_terminal* terminal,
 
     char buffer[1024];
     int i = start;
+    int eol;
 
     guac_terminal_buffer_row* buffer_row =
         guac_terminal_buffer_get_row(terminal->buffer, row, 0);
@@ -297,6 +297,14 @@ static void guac_terminal_clipboard_append_row(guac_terminal* terminal,
     if (end < 0 || end > buffer_row->length - 1)
         end = buffer_row->length - 1;
 
+    /* Get position of last not null char */
+    for (eol = buffer_row->length - 1; eol > start; eol--) {
+
+        if (buffer_row->characters[eol].value != 0)
+            break;
+
+    }
+
     /* Repeatedly convert chunks of terminal buffer rows until entire specified
      * region has been appended to clipboard */
     while (i <= end) {
@@ -308,6 +316,10 @@ static void guac_terminal_clipboard_append_row(guac_terminal* terminal,
         for (i = start; i <= end; i++) {
 
             int codepoint = buffer_row->characters[i].value;
+
+            /* Fill empty with spaces if not at end of line */
+            if (codepoint == 0 && i < eol)
+                codepoint = GUAC_CHAR_SPACE;
 
             /* Ignore null (blank) characters */
             if (codepoint == 0 || codepoint == GUAC_CHAR_CONTINUATION)

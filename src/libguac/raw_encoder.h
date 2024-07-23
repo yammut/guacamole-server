@@ -17,7 +17,6 @@
  * under the License.
  */
 
-
 #ifndef GUAC_RAW_ENCODER_H
 #define GUAC_RAW_ENCODER_H
 
@@ -52,7 +51,7 @@ typedef struct raw_encoder_state {
     /**
      * Size of the PCM buffer, in bytes.
      */
-    int length;
+    size_t length;
 
     /**
      * The current number of bytes stored within the PCM buffer.

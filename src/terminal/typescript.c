@@ -20,6 +20,7 @@
 #include "common/io.h"
 #include "terminal/typescript.h"
 
+#include <guacamole/mem.h>
 #include <guacamole/timestamp.h>
 
 #include <errno.h>
@@ -32,12 +33,12 @@
 #include <fcntl.h>
 
 /**
- * Attempts to open a new typescript data file within the given path and having
- * the given name. If such a file already exists, sequential numeric suffixes
- * (.1, .2, .3, etc.) are appended until a filename is found which does not
- * exist (or until the maximum number of numeric suffixes has been tried). If
- * the file absolutely cannot be opened due to an error, -1 is returned and
- * errno is set appropriately.
+ * Attempts to open a typescript data file within the given path and having
+ * the given name. If such a file already exists and allow_write_existing is
+ * zero, sequential numeric suffixes (.1, .2, .3, etc.) are appended until a
+ * filename is found which does not exist (or until the maximum number of
+ * numeric suffixes has been tried). If the file absolutely cannot be opened
+ * due to an error, -1 is returned and errno is set appropriately.
  *
  * @param path
  *     The full path to the directory in which the data file should be created.
@@ -54,12 +55,17 @@
  * @param basename_size
  *     The number of bytes available within the provided basename buffer.
  *
+ * @param allow_write_existing
+ *     Non-zero if writing to an existing file should be allowed, or zero
+ *     otherwise.
+ *
  * @return
  *     The file descriptor of the open data file if open succeeded, or -1 on
  *     failure.
  */
 static int guac_terminal_typescript_open_data_file(const char* path,
-        const char* name, char* basename, int basename_size) {
+        const char* name, char* basename, int basename_size,
+        int allow_write_existing) {
 
     int i;
 
@@ -75,10 +81,11 @@ static int guac_terminal_typescript_open_data_file(const char* path,
         return -1;
     }
 
+    /* Require the file not exist already if allow_write_existing not set */
+    int file_flags = O_CREAT | O_WRONLY | (allow_write_existing ? 0 : O_EXCL);
+
     /* Attempt to open typescript data file */
-    int data_fd = open(basename,
-            O_CREAT | O_EXCL | O_WRONLY,
-            S_IRUSR | S_IWUSR | S_IRGRP);
+    int data_fd = open(basename, file_flags, S_IRUSR | S_IWUSR | S_IRGRP);
 
     /* Continuously retry with alternate names on failure */
     if (data_fd == -1) {
@@ -95,9 +102,7 @@ static int guac_terminal_typescript_open_data_file(const char* path,
             sprintf(suffix, "%i", i);
 
             /* Retry with newly-suffixed filename */
-            data_fd = open(basename,
-                    O_CREAT | O_EXCL | O_WRONLY,
-                    S_IRUSR | S_IWUSR | S_IRGRP);
+            data_fd = open(basename, file_flags, S_IRUSR | S_IWUSR | S_IRGRP);
 
         }
 
@@ -108,7 +113,7 @@ static int guac_terminal_typescript_open_data_file(const char* path,
 }
 
 guac_terminal_typescript* guac_terminal_typescript_alloc(const char* path,
-        const char* name, int create_path) {
+        const char* name, int create_path, int allow_write_existing) {
 
     /* Create path if it does not exist, fail if impossible */
     if (create_path && mkdir(path, S_IRWXU | S_IRGRP | S_IXGRP)
@@ -117,15 +122,16 @@ guac_terminal_typescript* guac_terminal_typescript_alloc(const char* path,
 
     /* Allocate space for new typescript */
     guac_terminal_typescript* typescript =
-        malloc(sizeof(guac_terminal_typescript));
+        guac_mem_alloc(sizeof(guac_terminal_typescript));
 
     /* Attempt to open typescript data file */
     typescript->data_fd = guac_terminal_typescript_open_data_file(
             path, name, typescript->data_filename,
             sizeof(typescript->data_filename)
-                - sizeof(GUAC_TERMINAL_TYPESCRIPT_TIMING_SUFFIX));
+                - sizeof(GUAC_TERMINAL_TYPESCRIPT_TIMING_SUFFIX),
+            allow_write_existing);
     if (typescript->data_fd == -1) {
-        free(typescript);
+        guac_mem_free(typescript);
         return NULL;
     }
 
@@ -134,17 +140,19 @@ guac_terminal_typescript* guac_terminal_typescript_alloc(const char* path,
                 "%s.%s", typescript->data_filename, GUAC_TERMINAL_TYPESCRIPT_TIMING_SUFFIX)
             >= sizeof(typescript->timing_filename)) {
         close(typescript->data_fd);
-        free(typescript);
+        guac_mem_free(typescript);
         return NULL;
     }
 
+    /* Require the file not exist already if allow_write_existing not set */
+    int file_flags = O_CREAT | O_WRONLY | (allow_write_existing ? 0 : O_EXCL);
+
     /* Attempt to open typescript timing file */
     typescript->timing_fd = open(typescript->timing_filename,
-            O_CREAT | O_EXCL | O_WRONLY,
-            S_IRUSR | S_IWUSR | S_IRGRP);
+            file_flags, S_IRUSR | S_IWUSR | S_IRGRP);
     if (typescript->timing_fd == -1) {
         close(typescript->data_fd);
-        free(typescript);
+        guac_mem_free(typescript);
         return NULL;
     }
 
@@ -228,7 +236,7 @@ void guac_terminal_typescript_free(guac_terminal_typescript* typescript) {
     close(typescript->timing_fd);
 
     /* Free allocated typescript data */
-    free(typescript);
+    guac_mem_free(typescript);
 
 }
 

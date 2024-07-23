@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include "guacamole/mem.h"
 #include "guacamole/client.h"
 #include "guacamole/protocol.h"
 #include "guacamole/recording.h"
@@ -38,11 +39,13 @@
 
 /**
  * Attempts to open a new recording within the given path and having the given
- * name. If such a file already exists, sequential numeric suffixes (.1, .2,
- * .3, etc.) are appended until a filename is found which does not exist (or
- * until the maximum number of numeric suffixes has been tried). If the file
- * absolutely cannot be opened due to an error, -1 is returned and errno is set
- * appropriately.
+ * name. If opening the file fails for any reason, or if such a file already
+ * exists and allow_write_existing is not set, sequential numeric suffixes
+ * (.1, .2, .3, etc.) are appended until a filename is found which does not
+ * exist (or until the maximum number of numeric suffixes has been tried).
+ * If the file exists and allow_write_existing is set, the recording will be
+ * appended to any existing file contents. If the file absolutely cannot be
+ * opened due to an error, -1 is returned and errno is set appropriately.
  *
  * @param path
  *     The full path to the directory in which the data file should be created.
@@ -59,12 +62,17 @@
  * @param basename_size
  *     The number of bytes available within the provided basename buffer.
  *
+ * @param allow_write_existing
+ *     Non-zero if writing to an existing file should be allowed, or zero
+ *     otherwise.
+ *
  * @return
  *     The file descriptor of the open data file if open succeeded, or -1 on
  *     failure.
  */
 static int guac_recording_open(const char* path,
-        const char* name, char* basename, int basename_size) {
+        const char* name, char* basename, int basename_size,
+        int allow_write_existing) {
 
     int i;
 
@@ -80,10 +88,11 @@ static int guac_recording_open(const char* path,
         return -1;
     }
 
+    /* Require the file not exist already if allow_write_existing not set */
+    int flags = O_CREAT | O_WRONLY | (allow_write_existing ? 0 : O_EXCL);
+
     /* Attempt to open recording */
-    int fd = open(basename,
-            O_CREAT | O_EXCL | O_WRONLY,
-            S_IRUSR | S_IWUSR | S_IRGRP);
+    int fd = open(basename, flags, S_IRUSR | S_IWUSR | S_IRGRP);
 
     /* Continuously retry with alternate names on failure */
     if (fd == -1) {
@@ -100,9 +109,7 @@ static int guac_recording_open(const char* path,
             sprintf(suffix, "%i", i);
 
             /* Retry with newly-suffixed filename */
-            fd = open(basename,
-                    O_CREAT | O_EXCL | O_WRONLY,
-                    S_IRUSR | S_IWUSR | S_IRGRP);
+            fd = open(basename, flags, S_IRUSR | S_IWUSR | S_IRGRP);
 
         }
 
@@ -137,7 +144,7 @@ static int guac_recording_open(const char* path,
 guac_recording* guac_recording_create(guac_client* client,
         const char* path, const char* name, int create_path,
         int include_output, int include_mouse, int include_touch,
-        int include_keys) {
+        int include_keys, int allow_write_existing) {
 
     char filename[GUAC_COMMON_RECORDING_MAX_NAME_LENGTH];
 
@@ -154,7 +161,8 @@ guac_recording* guac_recording_create(guac_client* client,
     }
 
     /* Attempt to open recording file */
-    int fd = guac_recording_open(path, name, filename, sizeof(filename));
+    int fd = guac_recording_open(
+            path, name, filename, sizeof(filename), allow_write_existing);
     if (fd == -1) {
         guac_client_log(client, GUAC_LOG_ERROR,
                 "Creation of recording failed: %s", strerror(errno));
@@ -162,7 +170,7 @@ guac_recording* guac_recording_create(guac_client* client,
     }
 
     /* Create recording structure with reference to underlying socket */
-    guac_recording* recording = malloc(sizeof(guac_recording));
+    guac_recording* recording = guac_mem_alloc(sizeof(guac_recording));
     recording->socket = guac_socket_open(fd);
     recording->include_output = include_output;
     recording->include_mouse = include_mouse;
@@ -191,7 +199,7 @@ void guac_recording_free(guac_recording* recording) {
         guac_socket_free(recording->socket);
 
     /* Free recording itself */
-    free(recording);
+    guac_mem_free(recording);
 
 }
 

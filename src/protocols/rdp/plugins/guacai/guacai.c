@@ -26,6 +26,7 @@
 #include <freerdp/dvc.h>
 #include <freerdp/settings.h>
 #include <guacamole/client.h>
+#include <guacamole/mem.h>
 #include <winpr/stream.h>
 #include <winpr/wtsapi.h>
 #include <winpr/wtypes.h>
@@ -149,7 +150,7 @@ static UINT guac_rdp_ai_close(IWTSVirtualChannelCallback* channel_callback) {
             "AUDIO_INPUT channel connection closed");
 
     guac_rdp_audio_buffer_end(audio_buffer);
-    free(ai_channel_callback);
+    guac_mem_free(ai_channel_callback);
     return CHANNEL_RC_OK;
 
 }
@@ -199,7 +200,7 @@ static UINT guac_rdp_ai_new_connection(
 
     /* Allocate new channel callback */
     guac_rdp_ai_channel_callback* ai_channel_callback =
-        calloc(1, sizeof(guac_rdp_ai_channel_callback));
+        guac_mem_zalloc(sizeof(guac_rdp_ai_channel_callback));
 
     /* Init listener callback with data from plugin */
     ai_channel_callback->client = ai_listener_callback->client;
@@ -219,7 +220,7 @@ static UINT guac_rdp_ai_new_connection(
  * needs to be initialized with other callbacks and data.
  *
  * @param plugin
- *     The AUDIO_INPUT plugin that needs to be initialied.
+ *     The AUDIO_INPUT plugin that needs to be initialized.
  *
  * @param manager
  *     The IWTSVirtualChannelManager instance with which the AUDIO_INPUT plugin
@@ -233,7 +234,7 @@ static UINT guac_rdp_ai_initialize(IWTSPlugin* plugin,
 
     /* Allocate new listener callback */
     guac_rdp_ai_listener_callback* ai_listener_callback =
-        calloc(1, sizeof(guac_rdp_ai_listener_callback));
+        guac_mem_zalloc(sizeof(guac_rdp_ai_listener_callback));
 
     /* Ensure listener callback is freed when plugin is terminated */
     guac_rdp_ai_plugin* ai_plugin = (guac_rdp_ai_plugin*) plugin;
@@ -268,8 +269,8 @@ static UINT guac_rdp_ai_terminated(IWTSPlugin* plugin) {
     guac_client* client = ai_plugin->client;
 
     /* Free all non-FreeRDP data */
-    free(ai_plugin->listener_callback);
-    free(ai_plugin);
+    guac_mem_free(ai_plugin->listener_callback);
+    guac_mem_free(ai_plugin);
 
     guac_client_log(client, GUAC_LOG_DEBUG, "AUDIO_INPUT plugin unloaded.");
     return CHANNEL_RC_OK;
@@ -282,7 +283,12 @@ static UINT guac_rdp_ai_terminated(IWTSPlugin* plugin) {
 UINT DVCPluginEntry(IDRDYNVC_ENTRY_POINTS* pEntryPoints) {
 
     /* Pull guac_client from arguments */
+#ifdef PLUGIN_DATA_CONST
+    const ADDIN_ARGV* args = pEntryPoints->GetPluginData(pEntryPoints);
+#else
     ADDIN_ARGV* args = pEntryPoints->GetPluginData(pEntryPoints);
+#endif
+
     guac_client* client = (guac_client*) guac_rdp_string_to_ptr(args->argv[1]);
 
     /* Pull previously-allocated plugin */
@@ -293,7 +299,7 @@ UINT DVCPluginEntry(IDRDYNVC_ENTRY_POINTS* pEntryPoints) {
     if (ai_plugin == NULL) {
 
         /* Init plugin callbacks and data */
-        ai_plugin = calloc(1, sizeof(guac_rdp_ai_plugin));
+        ai_plugin = guac_mem_zalloc(sizeof(guac_rdp_ai_plugin));
         ai_plugin->parent.Initialize = guac_rdp_ai_initialize;
         ai_plugin->parent.Terminated = guac_rdp_ai_terminated;
         ai_plugin->client = client;
@@ -308,4 +314,3 @@ UINT DVCPluginEntry(IDRDYNVC_ENTRY_POINTS* pEntryPoints) {
     return CHANNEL_RC_OK;
 
 }
-

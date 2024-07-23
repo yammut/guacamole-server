@@ -19,7 +19,10 @@
 
 #include "config.h"
 
+#include "guacamole/mem.h"
+
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 /**
@@ -41,6 +44,20 @@
  *     size of the buffer, zero will be returned.
  */
 #define REMAINING(n, length) (((n) < (length)) ? 0 : ((n) - (length)))
+
+int guac_itoa(char* restrict dest, unsigned int integer) {
+
+    /* Determine size of string. */
+    int str_size = snprintf(dest, 0, "%i", integer);
+
+    /* If an error occurs, just return that and skip the conversion. */
+    if (str_size < 0)
+        return str_size;
+
+    /* Do the conversion and return. */
+    return snprintf(dest, (str_size + 1), "%i", integer);
+
+}
 
 size_t guac_strlcpy(char* restrict dest, const char* restrict src, size_t n) {
 
@@ -113,15 +130,37 @@ char* guac_strnstr(const char *haystack, const char *needle, size_t len) {
 
 }
 
+char* guac_strndup(const char* str, size_t n) {
+
+    /* Return NULL if no string provided */
+    if (str == NULL)
+        return NULL;
+
+    /* Do not attempt to duplicate if the length is somehow magically so
+     * obscenely large that it will not be possible to add a null terminator */
+    size_t length;
+    size_t length_to_copy = strnlen(str, n);
+    if (guac_mem_ckd_add(&length, length_to_copy, 1))
+        return NULL;
+
+    /* Otherwise just copy to a new string in same manner as strndup() */
+    char* new_str = (char*)guac_mem_alloc(length);
+    if (new_str != NULL) {
+        memcpy(new_str, str, length_to_copy);
+        new_str[length_to_copy] = '\0';
+    }
+
+    return new_str;
+
+}
+
 char* guac_strdup(const char* str) {
 
     /* Return NULL if no string provided */
     if (str == NULL)
         return NULL;
 
-    /* Otherwise just invoke strdup() */
-    return strdup(str);
-
+    return guac_strndup(str, strlen(str));
 }
 
 size_t guac_strljoin(char* restrict dest, const char* restrict const* elements,
@@ -147,4 +186,3 @@ size_t guac_strljoin(char* restrict dest, const char* restrict const* elements,
     return length;
 
 }
-
