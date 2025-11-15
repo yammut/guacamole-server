@@ -18,7 +18,7 @@
 #
 
 AC_PREREQ([2.61])
-AC_INIT([guacamole-server], [1.5.5])
+AC_INIT([guacamole-server], [1.6.0])
 AC_CONFIG_AUX_DIR([build-aux])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AM_SILENT_RULES([yes])
@@ -44,8 +44,14 @@ PKG_PROG_PKG_CONFIG()
 AC_CHECK_HEADERS([fcntl.h stdlib.h string.h sys/socket.h time.h sys/time.h syslog.h unistd.h cairo/cairo.h pngstruct.h])
 
 # Source characteristics
+AC_DEFINE([_GNU_SOURCE],   [1], [Uses GNU-specific APIs (if available)])
 AC_DEFINE([_XOPEN_SOURCE], [700], [Uses X/Open and POSIX APIs])
 AC_DEFINE([__BSD_VISIBLE], [1], [Uses BSD-specific APIs (if available)])
+AC_DEFINE([_GNU_SOURCE], [1], [Use GNU sources (if available)])
+
+# Check for availability of non-portable sched_getaffinity() function (one of
+# several possible routes for determining the number of available processors)
+AC_CHECK_FUNCS([sched_getaffinity])
 
 # Check for whether math library is required
 AC_CHECK_LIB([m], [cos],
@@ -71,6 +77,9 @@ AC_CHECK_LIB([pthread], [pthread_create], [PTHREAD_LIBS=-lpthread
               AC_DEFINE([HAVE_LIBPTHREAD],,
                         [Whether libpthread was found])])
 
+# Check for pthread_setattr_default_np
+AC_CHECK_DECLS([pthread_setattr_default_np], , , [[#include <pthread.h>]])
+            
 # librt
 AC_CHECK_FUNC([timer_create], [AC_MSG_RESULT([timer_create was found without librt.])],
               [AC_CHECK_LIB([rt], [timer_create],
@@ -145,7 +154,7 @@ AC_SUBST(UUID_LIBS)
 AC_SUBST(CUNIT_LIBS)
 
 # Library functions
-AC_CHECK_FUNCS([clock_gettime gettimeofday memmove memset select strdup nanosleep])
+AC_CHECK_FUNCS([clock_gettime gettimeofday memmove memset select strdup nanosleep prctl])
 
 AC_CHECK_DECL([png_get_io_ptr],
     [AC_DEFINE([HAVE_PNG_GET_IO_PTR],,
@@ -224,6 +233,14 @@ AC_ARG_WITH(systemd_dir,
             ],systemd_dir=$withval)
 AM_CONDITIONAL([ENABLE_SYSTEMD], [test "x${systemd_dir}" != "x"])
 AC_SUBST(systemd_dir)
+
+# Systemd user
+AC_ARG_WITH(systemd_user,
+            [AS_HELP_STRING([--with-systemd-user=<username>],
+                            [the user configured in the systemd unit to run guacd @<:@default=daemon@:>@])],
+            [systemd_user=$withval],
+            [systemd_user=daemon])
+AC_SUBST(systemd_user)
 
 # guacd config file
 AC_ARG_WITH(guacd_conf,
@@ -648,11 +665,71 @@ then
 fi
 
 #
+# libVNCserver support for the rfbSetDesktopSizeMsg message and the screen
+# data structure, both of which are required in order to properly request that
+# a remote server resize its screen to match the dimensions that the client
+# sends. If libvnc lacks either this message or the screen data structure
+# remote resize will be completely disabled.
+#
+
+if test "x${have_libvncserver}" = "xyes"
+then
+
+    have_vnc_resize_support=yes
+    AC_CHECK_TYPE([rfbSetDesktopSizeMsg],
+                     [], [have_vnc_resize_support=no],
+                     [[#include <rfb/rfbproto.h>]])
+
+    AC_CHECK_MEMBERS([rfbClient.screen],
+                     [], [have_vnc_resize_support=no],
+                     [[#include <rfb/rfbclient.h>]])
+
+    if test "x${have_vnc_resize_support}" = "xno"
+    then
+        AC_MSG_WARN([
+      --------------------------------------------------------
+       The libvncclient library lacks support for either the
+       rfbSetDesktopSizeMsg message or for extended screen
+       support. Resizing of remote displays will be disabled.
+      --------------------------------------------------------])
+    else
+        AC_DEFINE([LIBVNC_HAS_RESIZE_SUPPORT],,
+                  [Whether VNC client will support sending desktop size messages.])
+    fi
+
+fi
+
+#
+# libVNCserver support for the requestedResize member, which enables the
+# client to pause frame buffer updates during a resize operation. If support
+# for this is missing, Guacamole may still attempt to send the resize requests
+# to the remote display, but there may be odd display behavior just before,
+# during, or just after the resize, if a display update message happens to
+# coincide closely enough with a display resize message.
+#
+
+if test "x${have_libvncserver}" = "xyes"
+then
+
+    have_vnc_requestedresize=yes
+    AC_CHECK_MEMBERS([rfbClient.requestedResize],
+                     [], [have_vnc_requestedresize=no],
+                     [[#include <rfb/rfbclient.h>]])
+
+    if test "x${have_vnc_requestedresize}" = "xyes"
+    then
+        AC_DEFINE([LIBVNC_CLIENT_HAS_REQUESTED_RESIZE],,
+                  [Whether rfbClient contains the requestedResize member.])
+    fi
+
+fi
+
+#
 # FreeRDP (libfreerdpX, libfreerdp-clientX, and libwinprX)
 #
 
 freerdp_version=
-have_freerdp=
+have_freerdp=disabled
 FREERDP_PLUGIN_DIR=
 
 AC_ARG_WITH([rdp],
@@ -673,7 +750,19 @@ OLDCPPFLAGS="$CPPFLAGS"
 
 if test "x$with_rdp" != "xno"
 then
-    freerdp_version=3
+    freerdp_version="(2.x)"
+    have_freerdp=yes
+    PKG_CHECK_MODULES([RDP], [freerdp2 freerdp-client2 winpr2],
+                      [CPPFLAGS="${RDP_CFLAGS} -Werror $CPPFLAGS"]
+                      [AS_IF([test "x${FREERDP_PLUGIN_DIR}" = "x"],
+                             [FREERDP_PLUGIN_DIR="`$PKG_CONFIG --variable=libdir freerdp2`/freerdp2"])],
+                      [freerdp_version=
+                       have_freerdp=no])
+fi
+
+if test "x$with_rdp" != "xno" -a "x${have_freerdp}" = "xno"
+then
+    freerdp_version="(3.x)"
     have_freerdp=yes
     PKG_CHECK_MODULES([RDP], [freerdp3 freerdp-client3 winpr3],
                       [CPPFLAGS="${RDP_CFLAGS} -Werror $CPPFLAGS"]
@@ -681,25 +770,10 @@ then
                              [FREERDP_PLUGIN_DIR="`$PKG_CONFIG --variable=libdir freerdp3`/freerdp3"])],
                       [AC_MSG_WARN([
   --------------------------------------------
-   Unable to find FreeRDP3 (libfreerdp3 / libfreerdp-client3 / libwinpr3).
-   Checking for FreeRDP2.
-  --------------------------------------------])
-                       have_freerdp=no])
-fi
-
-if test "x$with_rdp" != "xno" -a "x${have_freerdp}" = "xno"
-then
-    freerdp_version=2
-    have_freerdp=yes
-    PKG_CHECK_MODULES([RDP], [freerdp2 freerdp-client2 winpr2],
-                      [CPPFLAGS="${RDP_CFLAGS} -Werror $CPPFLAGS"]
-                      [AS_IF([test "x${FREERDP_PLUGIN_DIR}" = "x"],
-                             [FREERDP_PLUGIN_DIR="`$PKG_CONFIG --variable=libdir freerdp2`/freerdp2"])],
-                      [AC_MSG_WARN([
-  --------------------------------------------
-   Unable to find FreeRDP2 (libfreerdp2 / libfreerdp-client2 / libwinpr2)
+   Unable to find FreeRDP.
    RDP will be disabled.
   --------------------------------------------])
+                       freerdp_version=
                        have_freerdp=no])
 fi
 
@@ -1062,6 +1136,30 @@ then
     [AC_MSG_RESULT([no])])
 fi
 
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_MSG_CHECKING([whether freerdp instance supports LoadChannels])
+    AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+        #include <freerdp/freerdp.h>
+
+        /* Mock LoadChannels function with the expected signature */
+        BOOL load_channels(freerdp* instance) {
+            return TRUE;
+        }
+
+        int main() {
+            freerdp* instance = freerdp_new();
+            instance->LoadChannels = load_channels;
+            freerdp_free(instance);
+            return 0;
+        }
+    ]])],
+    [AC_MSG_RESULT([yes])]
+    [AC_DEFINE([RDP_INST_HAS_LOAD_CHANNELS],,
+               [Defined if freerdp instance supports LoadChannels])],
+    [AC_MSG_RESULT([no])])
+fi
+
 # Restore CPPFLAGS, removing FreeRDP-specific options needed for testing
 CPPFLAGS="$OLDCPPFLAGS"
 
@@ -1349,6 +1447,7 @@ AC_CONFIG_FILES([Makefile
                  src/common-ssh/Makefile
                  src/common-ssh/tests/Makefile
                  src/terminal/Makefile
+                 src/terminal/tests/Makefile
                  src/libguac/Makefile
                  src/libguac/tests/Makefile
                  src/guacd/Makefile
@@ -1397,6 +1496,7 @@ AM_COND_IF([ENABLE_INIT], [build_init="${init_dir}"], [build_init=no])
 #
 
 AM_COND_IF([ENABLE_SYSTEMD], [build_systemd="${systemd_dir}"], [build_systemd=no])
+AM_COND_IF([ENABLE_SYSTEMD], [build_systemd_user="${systemd_user}"], [build_systemd_user=no])
 
 #
 # FreeRDP plugins
@@ -1415,7 +1515,7 @@ $PACKAGE_NAME version $PACKAGE_VERSION
 
    Library status:
 
-     freerdp${freerdp_version} ............ ${have_freerdp}
+     freerdp ............. ${have_freerdp} ${freerdp_version}
      pango ............... ${have_pango}
      libavcodec .......... ${have_libavcodec}
      libavformat ......... ${have_libavformat}
@@ -1445,9 +1545,19 @@ $PACKAGE_NAME version $PACKAGE_VERSION
       guacenc .... ${build_guacenc}
       guaclog .... ${build_guaclog}
 
-   FreeRDP${freerdp_version} plugins: ${build_rdp_plugins}
+   FreeRDP plugins: ${build_rdp_plugins}
    Init scripts: ${build_init}
    Systemd units: ${build_systemd}
+   Systemd user: ${build_systemd_user}
 
 Type \"make\" to compile $PACKAGE_NAME.
 "
+
+if test "x$freerdp_version" = "x(3.x)"
+then
+    AC_MSG_WARN([
+  --------------------------------------------
+    Support for FreeRDP 3.x is currently experimental. Some features, like
+    RemoteApp, have known issues. If not testing, consider using FreeRDP 2.x.
+  --------------------------------------------])
+fi

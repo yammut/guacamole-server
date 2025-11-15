@@ -30,6 +30,11 @@
 #define GUAC_VNC_DEFAULT_RECORDING_NAME "recording"
 
 /**
+ * The default number of seconds to attempt to connect to the SFTP server.
+ */
+#define GUAC_VNC_DEFAULT_SFTP_TIMEOUT 10
+
+/**
  * VNC-specific client data.
  */
 typedef struct guac_vnc_settings {
@@ -53,6 +58,12 @@ typedef struct guac_vnc_settings {
      * The password given in the arguments.
      */
     char* password;
+
+    /**
+     * Disable the VNC client messages to request that the remote (server)
+     * display resize to match the client resolution.
+     */
+    bool disable_display_resize;
 
     /**
      * Space-separated list of encodings to use within the VNC session.
@@ -146,6 +157,11 @@ typedef struct guac_vnc_settings {
      * to use the encoding required by the VNC standard.
      */
     char* clipboard_encoding;
+    
+    /**
+     * The maximum number of bytes to allow within the clipboard.
+     */
+    int clipboard_buffer_size;
 
     /**
      * Whether outbound clipboard access should be blocked. If set, it will not
@@ -183,6 +199,11 @@ typedef struct guac_vnc_settings {
     char* sftp_port;
 
     /**
+     * The number of seconds to attempt to connect to the SFTP server.
+     */
+    int sftp_timeout;
+
+    /**
      * The username to provide when authenticating with the SSH server for
      * SFTP.
      */
@@ -205,6 +226,12 @@ typedef struct guac_vnc_settings {
      * key.
      */
     char* sftp_passphrase;
+
+    /**
+     * The base64-encoded public key to use when authenticating with the SSH
+     * server for SFTP using key-based authentication.
+     */
+    char* sftp_public_key;
 
     /**
      * The default location for file uploads within the SSH server. This will

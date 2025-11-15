@@ -27,7 +27,7 @@
 #include <guacamole/mem.h>
 #include <guacamole/protocol.h>
 #include <guacamole/recording.h>
-#include <guacamole/socket-tcp.h>
+#include <guacamole/tcp.h>
 #include <guacamole/timestamp.h>
 #include <guacamole/wol-constants.h>
 #include <guacamole/wol.h>
@@ -386,7 +386,7 @@ static telnet_t* __guac_telnet_create_session(guac_client* client) {
     guac_telnet_client* telnet_client = (guac_telnet_client*) client->data;
     guac_telnet_settings* settings = telnet_client->settings;
 
-    int fd = guac_socket_tcp_connect(settings->hostname, settings->port);
+    int fd = guac_tcp_connect(settings->hostname, settings->port, settings->timeout);
 
     /* Open telnet session */
     telnet_t* telnet = telnet_init(__telnet_options, __guac_telnet_event_handler, 0, client);
@@ -511,7 +511,8 @@ void* guac_telnet_client_thread(void* data) {
                     settings->wol_wait_time,
                     GUAC_WOL_DEFAULT_CONNECT_RETRIES,
                     settings->hostname,
-                    settings->port)) {
+                    settings->port,
+                    settings->timeout)) {
                 guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet or connect to remote server.");
                 return NULL;
             }
@@ -544,12 +545,14 @@ void* guac_telnet_client_thread(void* data) {
             settings->width, settings->height, settings->resolution);
 
     /* Set optional parameters */
+    options->clipboard_buffer_size = settings->clipboard_buffer_size;
     options->disable_copy = settings->disable_copy;
     options->max_scrollback = settings->max_scrollback;
     options->font_name = settings->font_name;
     options->font_size = settings->font_size;
     options->color_scheme = settings->color_scheme;
     options->backspace = settings->backspace;
+    options->func_keys_and_keypad = settings->func_keys_and_keypad;
 
     /* Create terminal */
     telnet_client->term = guac_terminal_create(client, options);

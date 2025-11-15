@@ -19,7 +19,6 @@
 
 #include "argv.h"
 #include "beep.h"
-#include "bitmap.h"
 #include "channels/audio-input/audio-buffer.h"
 #include "channels/audio-input/audio-input.h"
 #include "channels/cliprdr.h"
@@ -32,13 +31,11 @@
 #include "channels/rdpsnd/rdpsnd.h"
 #include "client.h"
 #include "color.h"
-#include "common/cursor.h"
-#include "common/display.h"
 #include "config.h"
 #include "error.h"
 #include "fs.h"
 #include "gdi.h"
-#include "glyph.h"
+#include "input.h"
 #include "keyboard.h"
 #include "plugins/channels.h"
 #include "pointer.h"
@@ -64,6 +61,7 @@
 #include <guacamole/argv.h>
 #include <guacamole/audio.h>
 #include <guacamole/client.h>
+#include <guacamole/display.h>
 #include <guacamole/mem.h>
 #include <guacamole/protocol.h>
 #include <guacamole/recording.h>
@@ -79,20 +77,42 @@
 #include <stdlib.h>
 #include <time.h>
 
-BOOL rdp_freerdp_pre_connect(freerdp* instance) {
-
+/**
+ * Initializes and loads the necessary FreeRDP plugins based on the current
+ * RDP session settings. This function is designed to work in environments
+ * where the FreeRDP instance expects a LoadChannels callback to be set
+ * otherwise it can becalled directly from our pre_connect callback. It
+ * configures various features such as display resizing, multi-touch support,
+ * audio input, clipboard synchronization, device redirection, and graphics
+ * pipeline, by loading their corresponding plugins if they are enabled in the
+ * session settings.
+ *
+ * @param instance
+ *     The FreeRDP instance to be prepared, containing all context and
+ *     settings for the session.
+ *
+ * @return
+ *     Always TRUE.
+ */
+static BOOL rdp_freerdp_load_channels(freerdp* instance) {
     rdpContext* context = GUAC_RDP_CONTEXT(instance);
-    rdpGraphics* graphics = context->graphics;
-
     guac_client* client = ((rdp_freerdp_context*) context)->client;
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
     guac_rdp_settings* settings = rdp_client->settings;
 
-    /* Push desired settings to FreeRDP */
-    guac_rdp_push_settings(client, settings, instance);
+    /* Load RAIL plugin if RemoteApp in use */
+    if (settings->remote_app != NULL)
+        guac_rdp_rail_load_plugin(context);
 
-    /* Init FreeRDP add-in provider */
-    freerdp_register_addin_provider(freerdp_channels_load_static_addin_entry, 0);
+    /* Load SVC plugin instances for all static channels */
+    if (settings->svc_names != NULL) {
+
+        char** current = settings->svc_names;
+        do {
+            guac_rdp_pipe_svc_load_plugin(context, *current);
+        } while (*(++current) != NULL);
+
+    }
 
     /* Load "disp" plugin for display update */
     if (settings->resize_method == GUAC_RESIZE_DISPLAY_UPDATE)
@@ -125,42 +145,56 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
         guac_rdpsnd_load_plugin(context);
     }
 
-    /* Load RAIL plugin if RemoteApp in use */
-    if (settings->remote_app != NULL)
-        guac_rdp_rail_load_plugin(context);
+    /* Load "rdpgfx" plugin for Graphics Pipeline Extension */
+    if (settings->enable_gfx)
+        guac_rdp_rdpgfx_load_plugin(context);
 
-    /* Load SVC plugin instances for all static channels */
-    if (settings->svc_names != NULL) {
-
-        char** current = settings->svc_names;
-        do {
-            guac_rdp_pipe_svc_load_plugin(context, *current);
-        } while (*(++current) != NULL);
-
+    /* Load plugin providing Dynamic Virtual Channel support, if required */
+    if (freerdp_settings_get_bool(GUAC_RDP_CONTEXT(instance)->settings, FreeRDP_SupportDynamicChannels) &&
+            guac_freerdp_channels_load_plugin(context, "drdynvc",
+                GUAC_RDP_CONTEXT(instance)->settings)) {
+        guac_client_log(client, GUAC_LOG_WARNING,
+                "Failed to load drdynvc plugin. Display update and audio "
+                "input support will be disabled.");
     }
+
+    return TRUE;
+}
+
+/**
+ * Prepares the FreeRDP instance for connection by setting up session-specific
+ * configurations like graphics, plugins, and RDP settings. This involves
+ * integrating Guacamole's custom rendering handlers (for bitmaps, glyphs,
+ * and pointers). If using a freerdp instance that does not expect a
+ * LoadChannels callback then this function manually loads RDP channels.
+ * 
+ * @param instance
+ *     The FreeRDP instance to be prepared, containing all context and
+ *     settings for the session.
+ *
+ * @return
+ *     Returns TRUE if the pre-connection process completes successfully.
+ *     Returns FALSE if an error occurs during the initialization of the
+ *     FreeRDP GDI system.
+ */
+static BOOL rdp_freerdp_pre_connect(freerdp* instance) {
+
+    rdpContext* context = GUAC_RDP_CONTEXT(instance);
+    rdpGraphics* graphics = context->graphics;
+
+    guac_client* client = ((rdp_freerdp_context*) context)->client;
+    guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
+    guac_rdp_settings* settings = rdp_client->settings;
+
+    /* Push desired settings to FreeRDP */
+    guac_rdp_push_settings(client, settings, instance);
+
+    /* Init FreeRDP add-in provider */
+    freerdp_register_addin_provider(freerdp_channels_load_static_addin_entry, 0);
 
     /* Init FreeRDP internal GDI implementation */
     if (!gdi_init(instance, guac_rdp_get_native_pixel_format(FALSE)))
         return FALSE;
-
-    /* Set up bitmap handling */
-    rdpBitmap bitmap = *graphics->Bitmap_Prototype;
-    bitmap.size = sizeof(guac_rdp_bitmap);
-    bitmap.New = guac_rdp_bitmap_new;
-    bitmap.Free = guac_rdp_bitmap_free;
-    bitmap.Paint = guac_rdp_bitmap_paint;
-    bitmap.SetSurface = guac_rdp_bitmap_setsurface;
-    graphics_register_bitmap(graphics, &bitmap);
-
-    /* Set up glyph handling */
-    rdpGlyph glyph = *graphics->Glyph_Prototype;
-    glyph.size = sizeof(guac_rdp_glyph);
-    glyph.New = guac_rdp_glyph_new;
-    glyph.Free = guac_rdp_glyph_free;
-    glyph.Draw = guac_rdp_glyph_draw;
-    glyph.BeginDraw = guac_rdp_glyph_begindraw;
-    glyph.EndDraw = guac_rdp_glyph_enddraw;
-    graphics_register_glyph(graphics, &glyph);
 
     /* Set up pointer handling */
     rdpPointer pointer = *graphics->Pointer_Prototype;
@@ -182,33 +216,19 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
     GUAC_RDP_CONTEXT(instance)->update->DesktopResize = guac_rdp_gdi_desktop_resize;
     GUAC_RDP_CONTEXT(instance)->update->BeginPaint = guac_rdp_gdi_begin_paint;
     GUAC_RDP_CONTEXT(instance)->update->EndPaint = guac_rdp_gdi_end_paint;
-    GUAC_RDP_CONTEXT(instance)->update->SetBounds = guac_rdp_gdi_set_bounds;
 
     GUAC_RDP_CONTEXT(instance)->update->SurfaceFrameMarker = guac_rdp_gdi_surface_frame_marker;
     GUAC_RDP_CONTEXT(instance)->update->altsec->FrameMarker = guac_rdp_gdi_frame_marker;
 
-    rdpPrimaryUpdate* primary = GUAC_RDP_CONTEXT(instance)->update->primary;
-    primary->DstBlt = guac_rdp_gdi_dstblt;
-    primary->PatBlt = guac_rdp_gdi_patblt;
-    primary->ScrBlt = guac_rdp_gdi_scrblt;
-    primary->MemBlt = guac_rdp_gdi_memblt;
-    primary->OpaqueRect = guac_rdp_gdi_opaquerect;
-
-    /* Load "rdpgfx" plugin for Graphics Pipeline Extension */
-    if (settings->enable_gfx)
-        guac_rdp_rdpgfx_load_plugin(context);
-
-    /* Load plugin providing Dynamic Virtual Channel support, if required */
-    if (freerdp_settings_get_bool(GUAC_RDP_CONTEXT(instance)->settings, FreeRDP_SupportDynamicChannels) &&
-            guac_freerdp_channels_load_plugin(context, "drdynvc",
-                GUAC_RDP_CONTEXT(instance)->settings)) {
-        guac_client_log(client, GUAC_LOG_WARNING,
-                "Failed to load drdynvc plugin. Display update and audio "
-                "input support will be disabled.");
-    }
+    /*
+     * If the freerdp instance does not have a LoadChannels callback for
+     * loading plugins we use the PreConnect callback to load plugins instead.
+     */
+    #ifndef RDP_INST_HAS_LOAD_CHANNELS
+        rdp_freerdp_load_channels(instance);
+    #endif
 
     return TRUE;
-
 }
 
 /**
@@ -413,19 +433,25 @@ static DWORD rdp_freerdp_verify_certificate(freerdp* instance,
  *     A positive value if messages are ready, zero if the specified timeout
  *     period elapsed, or a negative value if an error occurs.
  */
-static int rdp_guac_client_wait_for_messages(guac_client* client,
+static int rdp_guac_client_wait_for_events(guac_client* client,
         int timeout_msecs) {
 
     guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
     freerdp* rdp_inst = rdp_client->rdp_inst;
 
     HANDLE handles[GUAC_RDP_MAX_FILE_DESCRIPTORS];
-    int num_handles = freerdp_get_event_handles(GUAC_RDP_CONTEXT(rdp_inst), handles,
-            GUAC_RDP_MAX_FILE_DESCRIPTORS);
+    int num_handles = 0;
+
+    handles[num_handles++] = rdp_client->input_event_queued;
+
+    num_handles += freerdp_get_event_handles(GUAC_RDP_CONTEXT(rdp_inst),
+            handles + num_handles, GUAC_RDP_MAX_FILE_DESCRIPTORS - num_handles);
 
     /* Wait for data and construct a reasonable frame */
-    int result = WaitForMultipleObjects(num_handles, handles, FALSE,
+    DWORD result = WaitForMultipleObjects(num_handles, handles, FALSE,
             timeout_msecs);
+
+    ResetEvent(rdp_client->input_event_queued);
 
     /* Translate WaitForMultipleObjects() return values */
     switch (result) {
@@ -442,6 +468,30 @@ static int rdp_guac_client_wait_for_messages(guac_client* client,
 
     /* Wait was successful */
     return 1;
+
+}
+
+/**
+ * Handles any queued RDP-related events, including inbound RDP messages that
+ * have been received, updating the Guacamole display accordingly.
+ *
+ * @param rdp_client
+ *     The guac_rdp_client of the RDP connection whose current messages should
+ *     be handled.
+ *
+ * @return
+ *     True (non-zero) if messages were handled successfully, false (zero)
+ *     otherwise.
+ */
+static int guac_rdp_handle_events(guac_rdp_client* rdp_client) {
+
+    /* Actually handle messages (this may result in drawing to the
+     * guac_display, resizing the display buffer, etc.) */
+    pthread_mutex_lock(&(rdp_client->message_lock));
+    int retval = freerdp_check_event_handles(GUAC_RDP_CONTEXT(rdp_client->rdp_inst));
+    pthread_mutex_unlock(&(rdp_client->message_lock));
+
+    return retval;
 
 }
 
@@ -475,20 +525,29 @@ static int guac_rdp_handle_connection(guac_client* client) {
     guac_rwlock_acquire_write_lock(&(rdp_client->lock));
 
     /* Create display */
-    rdp_client->display = guac_common_display_alloc(client,
-            rdp_client->settings->width,
-            rdp_client->settings->height);
+    rdp_client->display = guac_display_alloc(client);
+
+    guac_display_layer* default_layer = guac_display_default_layer(rdp_client->display);
+    guac_display_layer_resize(default_layer, rdp_client->settings->width, rdp_client->settings->height);
 
     /* Use lossless compression only if requested (otherwise, use default
      * heuristics) */
-    guac_common_display_set_lossless(rdp_client->display, settings->lossless);
+    guac_display_layer_set_lossless(default_layer, settings->lossless);
 
-    rdp_client->current_surface = rdp_client->display->default_surface;
+    rdp_client->current_surface = default_layer;
 
     rdp_client->available_svc = guac_common_list_alloc();
 
     /* Init client */
     freerdp* rdp_inst = freerdp_new();
+
+    /*
+     * If the freerdp instance has a LoadChannels callback for loading plugins
+     * we use that instead of the PreConnect callback to load plugins.
+     */
+    #ifdef RDP_INST_HAS_LOAD_CHANNELS
+        rdp_inst->LoadChannels = rdp_freerdp_load_channels;
+    #endif
     rdp_inst->PreConnect = rdp_freerdp_pre_connect;
     rdp_inst->Authenticate = rdp_freerdp_authenticate;
 
@@ -516,7 +575,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
             settings->server_layout);
 
     /* Set default pointer */
-    guac_common_cursor_set_pointer(rdp_client->display->cursor);
+    guac_display_set_cursor(rdp_client->display, GUAC_DISPLAY_CURSOR_POINTER);
 
     /* 
      * Downgrade the lock to allow for concurrent read access.
@@ -544,6 +603,8 @@ static int guac_rdp_handle_connection(guac_client* client) {
 
     guac_rwlock_release_lock(&(rdp_client->lock));
 
+    rdp_client->render_thread = guac_display_render_thread_create(rdp_client->display);
+
     /* Handle messages from RDP server while client is running */
     while (client->state == GUAC_CLIENT_RUNNING
             && !guac_rdp_disp_reconnect_needed(rdp_client->disp)) {
@@ -552,70 +613,38 @@ static int guac_rdp_handle_connection(guac_client* client) {
         guac_rdp_disp_update_size(rdp_client->disp, settings, rdp_inst);
 
         /* Wait for data and construct a reasonable frame */
-        int wait_result = rdp_guac_client_wait_for_messages(client,
-                GUAC_RDP_FRAME_START_TIMEOUT);
-        if (wait_result > 0) {
 
-            int processing_lag = guac_client_get_processing_lag(client);
+        int wait_result = rdp_guac_client_wait_for_events(client, GUAC_RDP_MESSAGE_CHECK_INTERVAL);
+        if (wait_result < 0)
+            break;
 
-            /* Read server messages until frame is built */
-            do {
+        int connection_closing;
+        do {
 
-                guac_timestamp frame_end;
-                int frame_remaining;
+            /* Handle any queued FreeRDP events (this may result in RDP messages
+             * being sent), aborting later if FreeRDP event handling fails */
+            if (!guac_rdp_handle_events(rdp_client))
+                wait_result = -1;
 
-                /* Handle any queued FreeRDP events (this may result in RDP
-                 * messages being sent) */
-                pthread_mutex_lock(&(rdp_client->message_lock));
-                int event_result = freerdp_check_event_handles(GUAC_RDP_CONTEXT(rdp_inst));
-                pthread_mutex_unlock(&(rdp_client->message_lock));
+            /* Test whether the RDP server is closing the connection */
+#ifdef HAVE_DISCONNECT_CONTEXT
+            connection_closing = freerdp_shall_disconnect_context(rdp_inst->context);
+#else
+            connection_closing = freerdp_shall_disconnect(rdp_inst);
+#endif
 
-                /* Abort if FreeRDP event handling fails */
-                if (!event_result) {
-                    wait_result = -1;
-                    break;
-                }
+        } while (!connection_closing &&
+                (wait_result = rdp_guac_client_wait_for_events(client, 0)) > 0);
 
-                /* Continue handling inbound data if we are in the middle of an RDP frame */
-                if (rdp_client->in_frame) {
-                    wait_result = rdp_guac_client_wait_for_messages(client, GUAC_RDP_FRAME_START_TIMEOUT);
-                    if (wait_result >= 0)
-                        continue;
-                }
-
-                /* Calculate time remaining in frame */
-                guac_timestamp frame_start = client->last_sent_timestamp;
-                frame_end = guac_timestamp_current();
-                frame_remaining = frame_start + GUAC_RDP_FRAME_DURATION
-                                - frame_end;
-
-                /* Calculate time that client needs to catch up */
-                int time_elapsed = frame_end - frame_start;
-                int required_wait = processing_lag - time_elapsed;
-
-                /* Increase the duration of this frame if client is lagging */
-                if (required_wait > GUAC_RDP_FRAME_TIMEOUT)
-                    wait_result = rdp_guac_client_wait_for_messages(client,
-                            required_wait);
-
-                /* Wait again if frame remaining */
-                else if (frame_remaining > 0)
-                    wait_result = rdp_guac_client_wait_for_messages(client,
-                            GUAC_RDP_FRAME_TIMEOUT);
-                else
-                    break;
-
-            } while (wait_result > 0);
-
+        /* Notify display of any changes to the GDI that may have occurred
+         * while handling events/messages */
+        if (rdp_client->gdi_modified) {
+            guac_display_render_thread_notify_modified(rdp_client->render_thread);
+            rdp_client->gdi_modified = 0;
         }
 
-        /* Test whether the RDP server is closing the connection */
-        int connection_closing;
-#ifdef HAVE_DISCONNECT_CONTEXT
-        connection_closing = freerdp_shall_disconnect_context(rdp_inst->context);
-#else
-        connection_closing = freerdp_shall_disconnect(rdp_inst);
-#endif
+        /* Handle any input events that have been received */
+        guac_rdp_handle_input_events(rdp_client);
 
         /* Close connection cleanly if server is disconnecting */
         if (connection_closing)
@@ -625,15 +654,6 @@ static int guac_rdp_handle_connection(guac_client* client) {
         else if (wait_result < 0)
             guac_client_abort(client, GUAC_PROTOCOL_STATUS_UPSTREAM_UNAVAILABLE,
                     "Connection closed.");
-
-        /* Flush frame only if successful and an RDP frame is not known to be
-         * in progress */
-        else if (!rdp_client->frames_supported || rdp_client->frames_received) {
-            guac_common_display_flush(rdp_client->display);
-            guac_client_end_multiple_frames(client, rdp_client->frames_received);
-            guac_socket_flush(client->socket);
-            rdp_client->frames_received = 0;
-        }
 
     }
 
@@ -650,8 +670,29 @@ static int guac_rdp_handle_connection(guac_client* client) {
     freerdp_disconnect(rdp_inst);
     pthread_mutex_unlock(&(rdp_client->message_lock));
 
-    /* Clean up FreeRDP internal GDI implementation */
+    /* Stop render loop */
+    guac_display_render_thread_destroy(rdp_client->render_thread);
+    rdp_client->render_thread = NULL;
+
+    /* Remove reference to FreeRDP's GDI buffer so that it can be safely freed
+     * prior to freeing the guac_display */
+    guac_display_layer_raw_context* context = guac_display_layer_open_raw(default_layer);
+    context->buffer = NULL;
+    guac_display_layer_close_raw(default_layer, context);
+
+    /* Ensure all background rendering processes are stopped before freeing
+     * underlying memory */
+    guac_display_stop(rdp_client->display);
+
+    /* Clean up FreeRDP internal GDI implementation (this must be done BEFORE
+     * freeing the guac_display, as freeing the GDI will free objects like
+     * rdpPointer that will attempt to free associated guac_display_layer
+     * instances during cleanup) */
     gdi_free(rdp_inst);
+
+    /* Free display */
+    guac_display_free(rdp_client->display);
+    rdp_client->display = NULL;
 
     /* Clean up RDP client context */
     freerdp_context_free(rdp_inst);
@@ -667,10 +708,6 @@ static int guac_rdp_handle_connection(guac_client* client) {
     /* Free RDP keyboard state */
     guac_rdp_keyboard_free(rdp_client->keyboard);
     rdp_client->keyboard = NULL;
-
-    /* Free display */
-    guac_common_display_free(rdp_client->display);
-    rdp_client->display = NULL;
 
     guac_rwlock_release_lock(&(rdp_client->lock));
 
@@ -717,7 +754,8 @@ void* guac_rdp_client_thread(void* data) {
                     settings->wol_wait_time,
                     GUAC_WOL_DEFAULT_CONNECT_RETRIES,
                     settings->hostname,
-                    (const char *) str_port)) {
+                    (const char *) str_port,
+                    GUAC_WOL_DEFAULT_CONNECTION_TIMEOUT)) {
                 guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet, or server failed to wake up.");
                 guac_mem_free(str_port);
                 return NULL;
@@ -799,6 +837,33 @@ void* guac_rdp_client_thread(void* data) {
                 return NULL;
             }
 
+            /* Import the public key, if that is specified. */
+            if (settings->sftp_public_key != NULL) {
+
+                guac_client_log(client, GUAC_LOG_DEBUG,
+                        "Attempting public key import");
+
+                /* Attempt to read public key */
+                if (guac_common_ssh_user_import_public_key(rdp_client->sftp_user,
+                            settings->sftp_public_key)) {
+
+                    /* Public key import fails. */
+                    guac_client_abort(client,
+                           GUAC_PROTOCOL_STATUS_CLIENT_UNAUTHORIZED,
+                           "Failed to import public key: %s",
+                            guac_common_ssh_key_error());
+
+                    guac_common_ssh_destroy_user(rdp_client->sftp_user);
+                    return NULL;
+
+                }
+
+                /* Success */
+                guac_client_log(client, GUAC_LOG_INFO,
+                        "Public key successfully imported.");
+
+            }
+
         }
 
         /* Otherwise, use specified password */
@@ -815,8 +880,8 @@ void* guac_rdp_client_thread(void* data) {
         /* Attempt SSH connection */
         rdp_client->sftp_session =
             guac_common_ssh_create_session(client, settings->sftp_hostname,
-                    settings->sftp_port, rdp_client->sftp_user, settings->sftp_server_alive_interval,
-                    settings->sftp_host_key, NULL);
+                    settings->sftp_port, rdp_client->sftp_user, settings->sftp_timeout,
+                    settings->sftp_server_alive_interval, settings->sftp_host_key, NULL);
 
         /* Fail if SSH connection does not succeed */
         if (rdp_client->sftp_session == NULL) {

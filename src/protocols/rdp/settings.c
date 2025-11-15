@@ -56,6 +56,7 @@ const char fips_nla_mode_warning[] = (
 const char* GUAC_RDP_CLIENT_ARGS[] = {
     "hostname",
     "port",
+    "timeout",
     GUAC_RDP_ARGV_DOMAIN,
     GUAC_RDP_ARGV_USERNAME,
     GUAC_RDP_ARGV_PASSWORD,
@@ -105,10 +106,12 @@ const char* GUAC_RDP_CLIENT_ARGS[] = {
     "sftp-hostname",
     "sftp-host-key",
     "sftp-port",
+    "sftp-timeout",
     "sftp-username",
     "sftp-password",
     "sftp-private-key",
     "sftp-passphrase",
+    "sftp-public-key",
     "sftp-directory",
     "sftp-root-directory",
     "sftp-server-alive-interval",
@@ -137,6 +140,7 @@ const char* GUAC_RDP_CLIENT_ARGS[] = {
 
     "load-balance-info",
 
+    "clipboard-buffer-size",
     "disable-copy",
     "disable-paste",
     
@@ -163,6 +167,11 @@ enum RDP_ARGS_IDX {
      * used.
      */
     IDX_PORT,
+
+    /**
+     * The amount of time to wait for the server to respond, in seconds.
+     */
+    IDX_TIMEOUT,
 
     /**
      * The domain of the user logging in.
@@ -456,6 +465,12 @@ enum RDP_ARGS_IDX {
     IDX_SFTP_PORT,
 
     /**
+     * The number of seconds to attempt to connect to the SSH server before
+     * timing out.
+     */
+    IDX_SFTP_TIMEOUT,
+
+    /**
      * The username to provide when authenticating with the SSH server for
      * SFTP. If blank, the username provided for the RDP user will be used.
      */
@@ -478,6 +493,12 @@ enum RDP_ARGS_IDX {
      * key.
      */
     IDX_SFTP_PASSPHRASE,
+
+    /**
+     * The base64-encoded public key to use when authenticating with the SSH
+     * server for SFTP.
+     */
+    IDX_SFTP_PUBLIC_KEY,
 
     /**
      * The default location for file uploads within the SSH server. This will
@@ -638,6 +659,11 @@ enum RDP_ARGS_IDX {
      * the connection broker, if a connection broker is being used.
      */
     IDX_LOAD_BALANCE_INFO,
+    
+    /**
+     * The maximum number of bytes to allow within the clipboard.
+     */
+    IDX_CLIPBOARD_BUFFER_SIZE,
 
     /**
      * Whether outbound clipboard access should be blocked. If set to "true",
@@ -815,6 +841,11 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
     settings->port =
         guac_user_parse_args_int(user, GUAC_RDP_CLIENT_ARGS, argv, IDX_PORT,
                 settings->security_mode == GUAC_SECURITY_VMCONNECT ? RDP_DEFAULT_VMCONNECT_PORT : RDP_DEFAULT_PORT);
+
+    /* Look for timeout settings and parse or set defaults. */
+    settings->timeout =
+        guac_user_parse_args_int(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_TIMEOUT, RDP_DEFAULT_TIMEOUT);
 
     guac_user_log(user, GUAC_LOG_DEBUG,
             "User resolution is %ix%i at %i DPI",
@@ -1087,6 +1118,11 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
         guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_SFTP_PORT, "22");
 
+    /* SFTP timeout */
+    settings->sftp_timeout =
+        guac_user_parse_args_int(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_SFTP_TIMEOUT, RDP_DEFAULT_SFTP_TIMEOUT);
+
     /* Username for SSH/SFTP authentication */
     settings->sftp_username =
         guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
@@ -1103,10 +1139,15 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
         guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_SFTP_PRIVATE_KEY, NULL);
 
-    /* Passphrase for decrypting the SFTP private key (if applicable */
+    /* Passphrase for decrypting the SFTP private key (if applicable) */
     settings->sftp_passphrase =
         guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_SFTP_PASSPHRASE, "");
+
+    /* Public key for authenticating to SFTP server, if applicable. */
+    settings->sftp_public_key =
+        guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_SFTP_PUBLIC_KEY, NULL);
 
     /* Default upload directory */
     settings->sftp_directory =
@@ -1249,6 +1290,27 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
         guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_LOAD_BALANCE_INFO, NULL);
 
+    /* Set the maximum number of bytes to allow within the clipboard. */
+    settings->clipboard_buffer_size =
+        guac_user_parse_args_int(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_CLIPBOARD_BUFFER_SIZE, 0);
+
+    /* Use default clipboard buffer size if given one is invalid. */
+    if (settings->clipboard_buffer_size < GUAC_COMMON_CLIPBOARD_MIN_LENGTH) {
+        settings->clipboard_buffer_size = GUAC_COMMON_CLIPBOARD_MIN_LENGTH;
+        guac_user_log(user, GUAC_LOG_INFO, "Unspecified or invalid clipboard buffer "
+                "size: \"%s\". Using the default minimum size: %i.",
+                argv[IDX_CLIPBOARD_BUFFER_SIZE],
+                settings->clipboard_buffer_size);
+    }
+    else if (settings->clipboard_buffer_size > GUAC_COMMON_CLIPBOARD_MAX_LENGTH) {
+        settings->clipboard_buffer_size = GUAC_COMMON_CLIPBOARD_MAX_LENGTH;
+        guac_user_log(user, GUAC_LOG_WARNING, "Invalid clipboard buffer "
+                "size: \"%s\". Using the default maximum size: %i.",
+                argv[IDX_CLIPBOARD_BUFFER_SIZE],
+                settings->clipboard_buffer_size);
+    }
+
     /* Parse clipboard copy disable flag */
     settings->disable_copy =
         guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
@@ -1296,8 +1358,8 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
         
         /* If WoL has been requested but no MAC address given, log a warning. */
         if(strcmp(argv[IDX_WOL_MAC_ADDR], "") == 0) {
-            guac_user_log(user, GUAC_LOG_WARNING, "WoL requested but no MAC ",
-                    "address specified.  WoL will not be sent.");
+            guac_user_log(user, GUAC_LOG_WARNING, "WoL was enabled, but no "
+                    "MAC address was provided. WoL will not be sent.");
             settings->wol_send_packet = 0;
         }
         
@@ -1374,6 +1436,7 @@ void guac_rdp_settings_free(guac_rdp_settings* settings) {
     guac_mem_free(settings->sftp_password);
     guac_mem_free(settings->sftp_port);
     guac_mem_free(settings->sftp_private_key);
+    guac_mem_free(settings->sftp_public_key);
     guac_mem_free(settings->sftp_username);
 #endif
 
@@ -1492,9 +1555,15 @@ void guac_rdp_push_settings(guac_client* client,
     /* Explicitly set flag value */
     freerdp_settings_set_uint32(rdp_settings, FreeRDP_PerformanceFlags, guac_rdp_get_performance_flags(guac_settings));
 
+    /* Set explicit connection type to LAN to prevent auto-detection */
+    freerdp_settings_set_uint32(rdp_settings, FreeRDP_ConnectionType, CONNECTION_TYPE_LAN);
+
     /* Always request frame markers */
     freerdp_settings_set_bool(rdp_settings, FreeRDP_FrameMarkerCommandEnabled, TRUE);
     freerdp_settings_set_bool(rdp_settings, FreeRDP_SurfaceFrameMarkerEnabled, TRUE);
+
+    freerdp_settings_set_bool(rdp_settings, FreeRDP_FastPathInput, TRUE);
+    freerdp_settings_set_bool(rdp_settings, FreeRDP_FastPathOutput, TRUE);
 
     /* Enable RemoteFX / Graphics Pipeline */
     if (guac_settings->enable_gfx) {
@@ -1509,7 +1578,6 @@ void guac_rdp_push_settings(guac_client* client,
         }
 
         /* Required for RemoteFX / Graphics Pipeline */
-        freerdp_settings_set_bool(rdp_settings, FreeRDP_FastPathOutput, TRUE);
         freerdp_settings_set_uint32(rdp_settings, FreeRDP_ColorDepth, RDP_GFX_REQUIRED_DEPTH);
         freerdp_settings_set_bool(rdp_settings, FreeRDP_SoftwareGdi, TRUE);
 
@@ -1517,10 +1585,10 @@ void guac_rdp_push_settings(guac_client* client,
 
     /* Set individual flags - some FreeRDP versions overwrite flags set by guac_rdp_get_performance_flags() above */
     freerdp_settings_set_bool(rdp_settings, FreeRDP_AllowFontSmoothing, guac_settings->font_smoothing_enabled);
-    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableWallpaper, guac_settings->wallpaper_enabled);
-    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableFullWindowDrag, guac_settings->full_window_drag_enabled);
-    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableMenuAnims, guac_settings->menu_animations_enabled);
-    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableThemes, guac_settings->theming_enabled);
+    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableWallpaper, !guac_settings->wallpaper_enabled);
+    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableFullWindowDrag, !guac_settings->full_window_drag_enabled);
+    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableMenuAnims, !guac_settings->menu_animations_enabled);
+    freerdp_settings_set_bool(rdp_settings, FreeRDP_DisableThemes, !guac_settings->theming_enabled);
     freerdp_settings_set_bool(rdp_settings, FreeRDP_AllowDesktopComposition, guac_settings->desktop_composition_enabled);
 
     /* Client name */
@@ -1643,6 +1711,7 @@ void guac_rdp_push_settings(guac_client* client,
         freerdp_settings_set_bool(rdp_settings, FreeRDP_Workarea, TRUE);
         freerdp_settings_set_bool(rdp_settings, FreeRDP_RemoteApplicationMode, TRUE);
         freerdp_settings_set_bool(rdp_settings, FreeRDP_RemoteAppLanguageBarSupported, TRUE);
+        freerdp_settings_set_bool(rdp_settings, FreeRDP_HiDefRemoteApp, guac_settings->enable_gfx);
         freerdp_settings_set_string(rdp_settings, FreeRDP_RemoteApplicationProgram, guac_strdup(guac_settings->remote_app));
         freerdp_settings_set_string(rdp_settings, FreeRDP_ShellWorkingDirectory, guac_strdup(guac_settings->remote_app_dir));
         freerdp_settings_set_string(rdp_settings, FreeRDP_RemoteApplicationCmdLine, guac_strdup(guac_settings->remote_app_args));
@@ -1694,19 +1763,6 @@ void guac_rdp_push_settings(guac_client* client,
     freerdp_settings_set_uint32(rdp_settings, FreeRDP_OsMinorType, OSMINORTYPE_UNSPECIFIED);
     freerdp_settings_set_bool(rdp_settings, FreeRDP_DesktopResize, TRUE);
 
-    /* Claim support only for specific updates, independent of FreeRDP defaults */
-	BYTE* order_support = freerdp_settings_get_pointer_writable(rdp_settings, FreeRDP_OrderSupport);
-	if (order_support) {
-        ZeroMemory(order_support, GUAC_RDP_ORDER_SUPPORT_LENGTH);
-        order_support[NEG_DSTBLT_INDEX] = TRUE;
-        order_support[NEG_SCRBLT_INDEX] = TRUE;
-        order_support[NEG_MEMBLT_INDEX] = !guac_settings->disable_bitmap_caching;
-        order_support[NEG_MEMBLT_V2_INDEX] = !guac_settings->disable_bitmap_caching;
-        order_support[NEG_GLYPH_INDEX_INDEX] = !guac_settings->disable_glyph_caching;
-        order_support[NEG_FAST_INDEX_INDEX] = !guac_settings->disable_glyph_caching;
-        order_support[NEG_FAST_GLYPH_INDEX] = !guac_settings->disable_glyph_caching;
-    }
-
 #ifdef HAVE_RDPSETTINGS_ALLOWUNANOUNCEDORDERSFROMSERVER
     /* Do not consider server use of unannounced orders to be a fatal error */
     freerdp_settings_set_bool(rdp_settings, FreeRDP_AllowUnanouncedOrdersFromServer, TRUE);
@@ -1721,6 +1777,7 @@ void guac_rdp_push_settings(guac_client* client,
     /* Connection */
     rdp_settings->ServerHostname = guac_strdup(guac_settings->hostname);
     rdp_settings->ServerPort = guac_settings->port;
+    rdp_settings->TcpAckTimeout = guac_settings->timeout * 1000;
 
     /* Session */
     rdp_settings->ColorDepth = guac_settings->color_depth;
@@ -1733,9 +1790,15 @@ void guac_rdp_push_settings(guac_client* client,
     /* Explicitly set flag value */
     rdp_settings->PerformanceFlags = guac_rdp_get_performance_flags(guac_settings);
 
+    /* Set explicit connection type to LAN to prevent auto-detection */
+    freerdp_settings_set_uint32(rdp_settings, FreeRDP_ConnectionType, CONNECTION_TYPE_LAN);
+
     /* Always request frame markers */
     rdp_settings->FrameMarkerCommandEnabled = TRUE;
     rdp_settings->SurfaceFrameMarkerEnabled = TRUE;
+
+    rdp_settings->FastPathInput = TRUE;
+    rdp_settings->FastPathOutput = TRUE;
 
     /* Enable RemoteFX / Graphics Pipeline */
     if (guac_settings->enable_gfx) {
@@ -1750,7 +1813,6 @@ void guac_rdp_push_settings(guac_client* client,
         }
 
         /* Required for RemoteFX / Graphics Pipeline */
-        rdp_settings->FastPathOutput = TRUE;
         rdp_settings->ColorDepth = RDP_GFX_REQUIRED_DEPTH;
         rdp_settings->SoftwareGdi = TRUE;
 
@@ -1766,7 +1828,8 @@ void guac_rdp_push_settings(guac_client* client,
 
     /* Client name */
     if (guac_settings->client_name != NULL) {
-        guac_strlcpy(rdp_settings->ClientHostname, guac_settings->client_name,
+        free(rdp_settings->ClientHostname);
+        rdp_settings->ClientHostname = guac_strndup(guac_settings->client_name,
                 RDP_CLIENT_HOSTNAME_SIZE);
     }
 
@@ -1884,6 +1947,7 @@ void guac_rdp_push_settings(guac_client* client,
         rdp_settings->Workarea = TRUE;
         rdp_settings->RemoteApplicationMode = TRUE;
         rdp_settings->RemoteAppLanguageBarSupported = TRUE;
+        rdp_settings->HiDefRemoteApp = guac_settings->enable_gfx;
         rdp_settings->RemoteApplicationProgram = guac_strdup(guac_settings->remote_app);
         rdp_settings->ShellWorkingDirectory = guac_strdup(guac_settings->remote_app_dir);
         rdp_settings->RemoteApplicationCmdLine = guac_strdup(guac_settings->remote_app_args);
@@ -1933,16 +1997,6 @@ void guac_rdp_push_settings(guac_client* client,
     rdp_settings->OsMajorType = OSMAJORTYPE_UNSPECIFIED;
     rdp_settings->OsMinorType = OSMINORTYPE_UNSPECIFIED;
     rdp_settings->DesktopResize = TRUE;
-
-    /* Claim support only for specific updates, independent of FreeRDP defaults */
-    ZeroMemory(rdp_settings->OrderSupport, GUAC_RDP_ORDER_SUPPORT_LENGTH);
-    rdp_settings->OrderSupport[NEG_DSTBLT_INDEX] = TRUE;
-    rdp_settings->OrderSupport[NEG_SCRBLT_INDEX] = TRUE;
-    rdp_settings->OrderSupport[NEG_MEMBLT_INDEX] = !guac_settings->disable_bitmap_caching;
-    rdp_settings->OrderSupport[NEG_MEMBLT_V2_INDEX] = !guac_settings->disable_bitmap_caching;
-    rdp_settings->OrderSupport[NEG_GLYPH_INDEX_INDEX] = !guac_settings->disable_glyph_caching;
-    rdp_settings->OrderSupport[NEG_FAST_INDEX_INDEX] = !guac_settings->disable_glyph_caching;
-    rdp_settings->OrderSupport[NEG_FAST_GLYPH_INDEX] = !guac_settings->disable_glyph_caching;
 
 #ifdef HAVE_RDPSETTINGS_ALLOWUNANOUNCEDORDERSFROMSERVER
     /* Do not consider server use of unannounced orders to be a fatal error */

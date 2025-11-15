@@ -17,28 +17,26 @@
  * under the License.
  */
 
-#ifndef __GUAC_SOCKET_TCP_H
-#define __GUAC_SOCKET_TCP_H
-
-#include "config.h"
-
-#include <stddef.h>
+#include <CUnit/CUnit.h>
+#include <guacamole/rect.h>
 
 /**
- * Given a hostname or IP address and port, attempt to connect to that
- * system, returning an open socket if the connection succeeds, or a negative
- * value if it fails. If it fails the errno variable will be set.
- *
- * @param hostname
- *     The hostname or IP address to which to attempt connections.
- *
- * @param port
- *     The TCP port to which to attempt to connect.
- *
- * @return
- *     A valid socket if the connection succeeds, or a negative integer if it
- *     fails.
+ * Test which verifies that guac_rect_constrain() restricts a given rectangle
+ * to arbitrary bounds.
  */
-int guac_socket_tcp_connect(const char* hostname, const char* port);
+void test_rect__constrain(void) {
 
-#endif // __GUAC_SOCKET_TCP_H
+    guac_rect max;
+    guac_rect rect;
+
+    guac_rect_init(&rect, -10, -10, 110, 110);
+    guac_rect_init(&max, 0, 0, 100, 100);
+    guac_rect_constrain(&rect, &max);
+
+    CU_ASSERT_EQUAL(0, rect.left);
+    CU_ASSERT_EQUAL(0, rect.top);
+    CU_ASSERT_EQUAL(100, rect.right);
+    CU_ASSERT_EQUAL(100, rect.bottom);
+
+}
+

@@ -40,7 +40,6 @@ nodist_libguac_client_rdp_la_SOURCES =  \
 libguac_client_rdp_la_SOURCES =                  \
     argv.c                                       \
     beep.c                                       \
-    bitmap.c                                     \
     channels/audio-input/audio-buffer.c          \
     channels/audio-input/audio-input.c           \
     channels/cliprdr.c                           \
@@ -67,8 +66,8 @@ libguac_client_rdp_la_SOURCES =                  \
     error.c                                      \
     fs.c                                         \
     gdi.c                                        \
-    glyph.c                                      \
     input.c                                      \
+    input-queue.c                                \
     keyboard.c                                   \
     keymap.c                                     \
     log.c                                        \
@@ -87,7 +86,6 @@ libguac_client_rdp_la_SOURCES =                  \
 noinst_HEADERS =                                 \
     argv.h                                       \
     beep.h                                       \
-    bitmap.h                                     \
     channels/audio-input/audio-buffer.h          \
     channels/audio-input/audio-input.h           \
     channels/cliprdr.h                           \
@@ -114,7 +112,6 @@ noinst_HEADERS =                                 \
     error.h                                      \
     fs.h                                         \
     gdi.h                                        \
-    glyph.h                                      \
     input.h                                      \
     keyboard.h                                   \
     keymap.h                                     \
