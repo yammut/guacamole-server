@@ -17,6 +17,8 @@
  * under the License.
  */
 
+#include "config.h"
+
 #include "common/clipboard.h"
 #include "common/cursor.h"
 #include "common/iconv.h"
@@ -1463,6 +1465,11 @@ static int __guac_terminal_send_key(guac_terminal* term, int keysym, int pressed
         if ((keysym == 'V' && term->mod_ctrl) || (keysym == 'v' && term->mod_meta))
             return guac_terminal_send_data(term, term->clipboard->buffer, term->clipboard->length);
 
+        /* If Shift+Tab (Backtab), send the appropriate escape sequence */
+        if (term->mod_shift && keysym == 0xFF09) {
+            return guac_terminal_send_string(term, "\x1B[Z");
+        }
+
         /*
          * Ctrl+Shift+C and Cmd+c shortcuts for copying are not handled, as
          * selecting text in the terminal automatically copies it. To avoid
@@ -1635,6 +1642,11 @@ static int __guac_terminal_send_key(guac_terminal* term, int keysym, int pressed
                 char backspace_str[] = { term->backspace, '\0' };
                 return guac_terminal_send_string(term, backspace_str);
             }
+
+            if (keysym == 0xFF09 || keysym == 0xFF89) return guac_terminal_send_string(term, "\x09"); /* Tab */
+            if (keysym == 0xFF0A) return guac_terminal_send_string(term, "\x0A");                     /* Line Feed */
+            if (keysym == 0xFF0D || keysym == 0xFF8D) return guac_terminal_send_string(term, "\x0D"); /* Enter */
+            if (keysym == 0xFF1B) return guac_terminal_send_string(term, "\x1B");                     /* Esc */
 
             /* Tab */
             if (keysym == GUAC_TERMINAL_KEY_TAB || keysym == GUAC_TERMINAL_KEY_KP_TAB)
