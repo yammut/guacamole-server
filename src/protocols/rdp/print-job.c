@@ -21,7 +21,9 @@
 #include "rdp.h"
 
 #include <guacamole/client.h>
+#include <guacamole/error.h>
 #include <guacamole/mem.h>
+#include <guacamole/proctitle.h>
 #include <guacamole/protocol.h>
 #include <guacamole/socket.h>
 #include <guacamole/stream.h>
@@ -391,6 +393,10 @@ static pid_t guac_rdp_create_filter_process(guac_client* client,
  */
 static void* guac_rdp_print_job_output_thread(void* data) {
 
+    /* Thread name rdp-print: streams output from the RDP print filter
+     * process to the client as a downloadable file. */
+    guac_thread_name_set("rdp-print");
+
     int length;
     char buffer[6048];
 
@@ -399,7 +405,11 @@ static void* guac_rdp_print_job_output_thread(void* data) {
             "process...");
 
     /* Read continuously while data remains */
-    while ((length = read(job->output_fd, buffer, sizeof(buffer))) > 0) {
+    while (1) {
+        GUAC_RETRY_EINTR(length, read(job->output_fd, buffer, sizeof(buffer)));
+
+        if (length <= 0)
+            break;
 
         /* Wait for client to be ready for blob */
         if (guac_rdp_print_job_wait_for_ack(job)) {
@@ -627,7 +637,8 @@ int guac_rdp_print_job_write(guac_rdp_print_job* job,
      * on other threads sending outstanding messages (resulting in deadlock if
      * those messages are blocked) */
     int unlock_status = pthread_mutex_unlock(&(rdp_client->message_lock));
-    int write_status = write(job->input_fd, buffer, length);
+    int write_status;
+    GUAC_RETRY_EINTR(write_status, write(job->input_fd, buffer, length));
 
     /* Restore RDP message lock state */
     if (!unlock_status)

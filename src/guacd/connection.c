@@ -17,8 +17,6 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "connection.h"
 #include "log.h"
 #include "move-fd.h"
@@ -30,6 +28,7 @@
 #include <guacamole/mem.h>
 #include <guacamole/parser.h>
 #include <guacamole/plugin.h>
+#include <guacamole/proctitle.h>
 #include <guacamole/protocol.h>
 #include <guacamole/socket.h>
 #include <guacamole/user.h>
@@ -71,7 +70,8 @@ static int __write_all(int fd, char* buffer, int length) {
     int remaining_length = length;
     while (remaining_length > 0) {
 
-        int written = write(fd, buffer, remaining_length);
+        int written;
+        GUAC_RETRY_EINTR(written, write(fd, buffer, remaining_length));
         if (written < 0)
             return -1;
 
@@ -105,6 +105,10 @@ static int __write_all(int fd, char* buffer, int length) {
  */
 static void* guacd_connection_write_thread(void* data) {
 
+    /* Thread name conn-write: forwards data from the connected user to the
+     * connection's child process. */
+    guac_thread_name_set("conn-write");
+
     guacd_connection_io_thread_params* params = (guacd_connection_io_thread_params*) data;
     char buffer[8192];
 
@@ -125,11 +129,25 @@ static void* guacd_connection_write_thread(void* data) {
             break;
     }
 
+    /* Signal end of input to the connection process. Without this, a user
+     * which vanishes without sending "disconnect" leaves that process blocked
+     * awaiting input indefinitely, as nothing further will inform it that its
+     * last user has left. */
+    if (shutdown(params->fd, SHUT_WR))
+        guacd_log(GUAC_LOG_ERROR, "Unable to signal end of user input to "
+                "connection process: %s. That process may remain running but "
+                "inactive, retaining the memory of its connection until guacd "
+                "is restarted.", strerror(errno));
+
     return NULL;
 
 }
 
 void* guacd_connection_io_thread(void* data) {
+
+    /* Thread name conn-read: forwards data from the connection's child
+     * process back to the connected user. */
+    guac_thread_name_set("conn-read");
 
     guacd_connection_io_thread_params* params = (guacd_connection_io_thread_params*) data;
     char buffer[8192];
@@ -140,7 +158,12 @@ void* guacd_connection_io_thread(void* data) {
     pthread_create(&write_thread, NULL, guacd_connection_write_thread, params);
 
     /* Transfer data from file descriptor to socket */
-    while ((length = read(params->fd, buffer, sizeof(buffer))) > 0) {
+    while (1) {
+        GUAC_RETRY_EINTR(length, read(params->fd, buffer, sizeof(buffer)));
+
+        if (length <= 0)
+            break;
+
         if (guac_socket_write(params->socket, buffer, length))
             break;
         guac_socket_flush(params->socket);
@@ -329,7 +352,8 @@ static int guacd_route_connection(guacd_proc_map* map, guac_socket* socket) {
             guacd_proc_map_add(map, proc);
 
             /* Wait for child to finish */
-            waitpid(proc->pid, NULL, 0);
+            pid_t wait_result;
+            GUAC_RETRY_EINTR(wait_result, waitpid(proc->pid, NULL, 0));
 
             /* Remove client */
             if (guacd_proc_map_remove(map, proc->client->connection_id) == NULL)
@@ -364,6 +388,10 @@ static int guacd_route_connection(guacd_proc_map* map, guac_socket* socket) {
 }
 
 void* guacd_connection_thread(void* data) {
+
+    /* Thread name conn-route: performs the protocol handshake for a new
+     * client connection and routes it to a connection process. */
+    guac_thread_name_set("conn-route");
 
     guacd_connection_thread_params* params = (guacd_connection_thread_params*) data;
 
@@ -402,4 +430,3 @@ void* guacd_connection_thread(void* data) {
     return NULL;
 
 }
-

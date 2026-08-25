@@ -17,14 +17,14 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "guacamole/mem.h"
 #include "guacamole/error.h"
+#include "guacamole/proctitle.h"
 #include "guacamole/protocol.h"
 #include "guacamole/socket.h"
 #include "guacamole/timestamp.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -45,12 +45,11 @@ char __guac_socket_BASE64_CHARACTERS[64] = {
 
 static void* __guac_socket_keep_alive_thread(void* data) {
 
-    int old_cancelstate;
+    /* Thread name keep-alive: periodically sends keep-alive NOPs on an
+     * otherwise idle socket. */
+    guac_thread_name_set("keep-alive");
 
-    /* Calculate sleep interval */
-    struct timespec interval;
-    interval.tv_sec  =  GUAC_SOCKET_KEEP_ALIVE_INTERVAL / 1000;
-    interval.tv_nsec = (GUAC_SOCKET_KEEP_ALIVE_INTERVAL % 1000) * 1000000L;
+    int old_cancelstate;
 
     /* Socket keep-alive loop */
     guac_socket* socket = (guac_socket*) data;
@@ -68,10 +67,17 @@ static void* __guac_socket_keep_alive_thread(void* data) {
 
         }
 
+        /* Calculate sleep interval every loop as nanosleep updates it
+           with the remaining time interval */
+        struct timespec interval;
+        interval.tv_sec  =  GUAC_SOCKET_KEEP_ALIVE_INTERVAL / 1000;
+        interval.tv_nsec = (GUAC_SOCKET_KEEP_ALIVE_INTERVAL % 1000) * 1000000L;
+
         /* Sleep until next keep-alive check, but allow thread cancellation
          * during that sleep */
+        int sleep_result;
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_cancelstate);
-        nanosleep(&interval, NULL);
+        GUAC_RETRY_EINTR(sleep_result, nanosleep(&interval, &interval));
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancelstate);
 
     }
